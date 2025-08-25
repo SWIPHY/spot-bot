@@ -1,6 +1,6 @@
 import express from 'express';
 import SpotifyWebApi from 'spotify-web-api-node';
-
+import { saveUserTokens } from "./util/tokenStore.js";
 
 export function startSpotifyServer() {
 const app = express();
@@ -40,21 +40,27 @@ res.redirect(url);
 });
 
 
-app.get('/callback', async (req, res) => {
-const { code, state } = req.query;
-if (!code) return res.status(400).send('❌ missing code');
+app.get("/callback", async (req, res) => {
+  const { code, state } = req.query;
+  if (!code) return res.status(400).send("❌ missing code");
+  try {
+    const data = await spotify.authorizationCodeGrant(code);
+    const userId = stateByUser.get(state);
 
+    // persist
+    saveUserTokens(userId, {
+      access_token: data.body.access_token,
+      refresh_token: data.body.refresh_token,   // parfois null si déjà donné
+      expires_in: data.body.expires_in,
+      scope: data.body.scope,
+    });
 
-try {
-const data = await spotify.authorizationCodeGrant(code);
-spotify.setAccessToken(data.body.access_token);
-spotify.setRefreshToken(data.body.refresh_token);
-console.log('🎉 Tokens reçus pour user:', stateByUser.get(state));
-res.send('🎶 Spotify connecté ! Retourne sur Discord.');
-} catch (err) {
-console.error('Erreur callback Spotify:', err?.body || err);
-res.status(500).send('❌ Erreur pendant l\'authentification Spotify.');
-}
+    console.log("🎉 Tokens sauvegardés pour user:", userId);
+    res.send("🎶 Spotify connecté ! Retourne sur Discord.");
+  } catch (err) {
+    console.error("Erreur callback Spotify:", err?.body || err);
+    res.status(500).send("❌ Erreur pendant l’authentification Spotify.");
+  }
 });
 
 
