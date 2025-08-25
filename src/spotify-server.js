@@ -4,7 +4,8 @@ import SpotifyWebApi from 'spotify-web-api-node';
 
 export function startSpotifyServer() {
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 8080; // force 8080 par défaut
+console.log('PORT used =', PORT);
 
 
 const spotify = new SpotifyWebApi({
@@ -57,5 +58,5 @@ res.status(500).send('❌ Erreur pendant l\'authentification Spotify.');
 });
 
 
-app.listen(PORT, () => console.log(`🌍 Spotify server on :${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🌍 Spotify server on :${PORT}`));
 }
