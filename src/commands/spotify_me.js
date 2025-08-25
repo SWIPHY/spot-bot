@@ -1,12 +1,9 @@
-import { userApi } from '../util/spotify.js';
+import { SlashCommandBuilder } from 'discord.js';
 
-export const data = { name: 'spotify_me', description: 'Voir mon profil Spotify' };
+export const data = new SlashCommandBuilder()
+  .setName('spotify_me')
+  .setDescription('(WIP) Affiche les infos de ton compte Spotify connecté');
+
 export async function execute(interaction) {
-  try {
-    const api = await userApi(interaction.user.id);
-    const me = (await api.getMe()).body;
-    return interaction.reply(`**${me.display_name}** — Followers: ${me.followers.total}\n${me.external_urls.spotify}`);
-  } catch {
-    return interaction.reply({ content: '🔗 Fais /spotify_link d’abord.', ephemeral: true });
-  }
+  return interaction.reply({ content: 'ℹ️ Fonction à brancher après stockage des tokens par utilisateur.', ephemeral: true });
 }

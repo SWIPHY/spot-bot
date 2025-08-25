@@ -1,19 +1,3 @@
-import { guardDJ } from '../util/permissions.js';
-
-export const data = { 
-  name: 'pause', 
-  description: 'Pause' 
-};
-
-export async function execute(interaction, ctx) {
-  try { 
-    guardDJ(interaction); 
-  } 
-  catch { 
-    return interaction.reply({ content: '🔒 Réservé au rôle DJ.', ephemeral: true }); 
-  }
-  const state = ctx.states.get(interaction.guildId);
-  if (!state) return interaction.reply('Aucun player.');
-  state.player.pause();
-  return interaction.reply('⏸️ Pause.');
-}
+import { SlashCommandBuilder } from 'discord.js';
+export const data = new SlashCommandBuilder().setName('pause').setDescription('(stub) Met en pause');
+export async function execute(interaction/*, ctx */) { return interaction.reply('⏸️ (stub) Pause'); }
