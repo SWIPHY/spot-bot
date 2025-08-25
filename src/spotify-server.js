@@ -32,7 +32,8 @@ const scopes = [
   "user-read-currently-playing",
   "playlist-modify-public",
   "playlist-modify-private",
-  "user-read-email"
+  "user-read-email",
+  "user-read-private"
 ];
 
 const state = `u_${user}_${Date.now()}`;
