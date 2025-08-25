@@ -24,6 +24,6 @@ export async function execute(interaction) {
     const url = `${base}/link?user=${interaction.user.id}`;
     return interaction.reply({ content: `🔗 Autorise ici : ${url}`, ephemeral: true });
   } catch (e) {
-    return interaction.reply({ content: `❌ ${e.message} sur le serveur.`, ephemeral: true });
+    return interaction.reply({ content: `❌ ${e.message} sur le serveur.`});
   }
 }
