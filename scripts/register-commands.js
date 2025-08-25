@@ -10,19 +10,28 @@ const __dirname = path.dirname(__filename);
 const commandsDir = path.join(__dirname, '..', 'src', 'commands');
 const files = fs.readdirSync(commandsDir).filter(f => f.endsWith('.js'));
 
+const seen = new Set();
 const slashDefs = [];
 for (const f of files) {
-  const absPath = path.join(commandsDir, f);
-  // 👉 convertit C:\...\monfichier.js en file:///C:/... pour ESM
-  const mod = await import(pathToFileURL(absPath).href);
+  const abs = path.join(commandsDir, f);
+  const mod = await import(pathToFileURL(abs).href);
 
-  const data = mod.data?.toJSON?.() || mod.data;
-  if (!data?.name) {
-    console.warn('⚠️  command sans data.name :', f);
+  const name = mod.data?.name || mod.name || mod.data?.toJSON?.().name;
+  if (!name || !mod.execute) {
+    console.warn('⚠️ ignoré (pas de name/execute):', f);
     continue;
   }
-  slashDefs.push(data);
+  if (seen.has(name)) {
+    console.warn(`⚠️ doublon "${name}" ignoré → fichier:`, f);
+    continue;
+  }
+  seen.add(name);
+
+  const json = mod.data?.toJSON?.() || mod.data;
+  slashDefs.push(json);
 }
+
+console.log('📦 commandes prêtes:', [...seen].join(', '));
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
