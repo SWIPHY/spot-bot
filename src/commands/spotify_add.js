@@ -63,8 +63,11 @@ export async function execute(interaction) {
     console.error("spotify_add error:", e?.body || e);
     const msg =
       e?.statusCode === 403
-        ? "❌ Permis manquants. Re-fais `/spotify_link` (scopes playlist-modify-*)."
-        : "❌ Impossible d’ajouter le titre (check logs).";
+        ? "❌ Pas les droits sur la playlist (ou scopes manquants). Refais `/spotify_link`."
+        : e?.body?.error?.message
+          ? `❌ Spotify API: ${e.body.error.message}`
+          : `❌ Erreur inattendue: ${JSON.stringify(e)}`;
     return interaction.reply({ content: msg, ephemeral: true });
   }
+
 }
