@@ -5,7 +5,7 @@ export const data = new SlashCommandBuilder()
   .setDescription("Connecte ton compte Spotify");
 
 function getBaseFromEnv() {
-  const redirect = process.env.SPOTIFY_REDIRECT_URL || process.env.PUBLIC_URL;
+  const redirect = process.env.SPOTIFY_REDIRECT_URL || process.env.SPOTIFY_REDIRECT_URL;
   if (!redirect) throw new Error("SPOTIFY_REDIRECT_URL manquant");
 
   // force un vrai URL (avec protocole), et enlève /callback si présent
@@ -22,7 +22,7 @@ export async function execute(interaction) {
   try {
     const base = getBaseFromEnv(); // ex: https://spot-bot-production.up.railway.app
     const url = `${base}/link?user=${interaction.user.id}`;
-    return interaction.reply({ content: `🔗 Autorise ici : ${url}`, ephemeral: true });
+    return interaction.reply({ content: `🔗 Autorise ici : ${url}` });
   } catch (e) {
     return interaction.reply({ content: `❌ ${e.message} sur le serveur.`});
   }
