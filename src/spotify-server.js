@@ -27,10 +27,13 @@ if (!user) return res.status(400).send('❌ missing user');
 
 
 const scopes = [
-'user-read-playback-state',
-'user-modify-playback-state',
-'user-read-currently-playing',
+  "user-read-playback-state",
+  "user-modify-playback-state",
+  "user-read-currently-playing",
+  "playlist-modify-public",
+  "playlist-modify-private",
 ];
+
 const state = `u_${user}_${Date.now()}`;
 stateByUser.set(state, user);
 
