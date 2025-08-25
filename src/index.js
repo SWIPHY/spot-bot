@@ -50,7 +50,19 @@ client.on('interactionCreate', async (interaction) => {
 
     const ctx = { states: new Map(), createGuildState: () => ({}) };
     await cmd.execute(interaction, ctx);
-  } catch (e) {
+
+    // sous ton try { ... } avant le catch:
+    if (interaction.isButton?.()) {
+      // spotify_playlist buttons
+      const pl = commands.get("spotify_playlist");
+      if (pl?.onButton && interaction.customId.startsWith("pl_")) {
+        await pl.onButton(interaction); 
+        return;
+      }
+    }
+  } 
+  
+  catch (e) {
     logToDiscord(`❌ Erreur: ${e.message}`);
     console.error(e);
     if (interaction.deferred || interaction.replied) {
