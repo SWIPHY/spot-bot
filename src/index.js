@@ -1,3 +1,4 @@
+// index.js
 import 'dotenv/config';
 import { Client, GatewayIntentBits, Collection, InteractionType } from 'discord.js';
 import fs from 'node:fs';
@@ -5,15 +6,18 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startSpotifyServer } from './spotify-server.js';
 import { initLogger, logToDiscord } from './util/logger.js';
+import { GuildPlayer } from './core/player.js';
+import { MusicQueue } from './core/queue.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ====== CLIENT ======
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
 
-// Charge toutes les commandes dynamiquement (compatible Windows)
+// ====== CHARGEMENT COMMANDES ======
 const commands = new Collection();
 const commandsDir = path.join(__dirname, 'commands');
 for (const f of fs.readdirSync(commandsDir).filter(f => f.endsWith('.js'))) {
@@ -26,43 +30,72 @@ for (const f of fs.readdirSync(commandsDir).filter(f => f.endsWith('.js'))) {
   commands.set(name, mod);
 }
 
+// ====== STATE PAR SERVEUR ======
+const states = new Map();
+/**
+ * Crée/récupère le state pour un serveur donné.
+ * @param {import('discord.js').Guild} guild
+ * @param {import('discord.js').TextBasedChannel} textChannel
+ */
+function createGuildState(guild, textChannel) {
+  const existing = states.get(guild.id);
+  if (existing) return existing;
+
+  const queue = new MusicQueue(guild.id);
+  const player = new GuildPlayer(guild, queue, textChannel);
+  const state = { queue, player };
+  states.set(guild.id, state);
+  return state;
+}
+
+// ====== READY ======
 client.once('ready', () => {
   console.log(`✅ Connecté en ${client.user.tag}`);
   initLogger(client);
   logToDiscord('🚀 Bot démarré et connecté !');
 });
 
+// ====== INTERACTIONS ======
 client.on('interactionCreate', async (interaction) => {
   try {
-    // Autocomplete
+    // --- Autocomplete
     if (interaction.type === InteractionType.ApplicationCommandAutocomplete) {
       const c = commands.get(interaction.commandName);
       if (c?.autocomplete) return c.autocomplete(interaction);
       return;
     }
 
-    // Slash commands
-    if (!interaction.isChatInputCommand()) return;
+    // --- Routeur boutons (avant de filtrer les slash)
+    if (interaction.isButton?.()) {
+      // pagination/contrôles pour la commande spotify_playlist
+      const pl = commands.get('spotify_playlist');
+      if (pl?.onButton && interaction.customId?.startsWith?.('pl_')) {
+        await pl.onButton(interaction);
+        return;
+      }
+      // si t'as d'autres boutons, tu peux router ici
+      return;
+    }
+
+    // --- Slash commands
+    if (!interaction.isChatInputCommand?.()) return;
+
     const cmd = commands.get(interaction.commandName);
     if (!cmd?.execute) {
       return interaction.reply({ content: 'Commande inconnue.', ephemeral: true });
     }
 
-    const ctx = { states: new Map(), createGuildState: () => ({}) };
-    await cmd.execute(interaction, ctx);
+    const guild = interaction.guild;
+    const textChannel = interaction.channel;
 
-    // sous ton try { ... } avant le catch:
-    if (interaction.isButton?.()) {
-      // spotify_playlist buttons
-      const pl = commands.get("spotify_playlist");
-      if (pl?.onButton && interaction.customId.startsWith("pl_")) {
-        await pl.onButton(interaction); 
-        return;
-      }
-    }
-  } 
-  
-  catch (e) {
+    // Contexte passé aux commandes
+    const ctx = {
+      states,
+      createGuildState: () => states.get(guild.id) || createGuildState(guild, textChannel),
+    };
+
+    await cmd.execute(interaction, ctx);
+  } catch (e) {
     logToDiscord(`❌ Erreur: ${e.message}`);
     console.error(e);
     if (interaction.deferred || interaction.replied) {
@@ -73,7 +106,6 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
+// ====== LOGIN + SPOTIFY ======
 client.login(process.env.DISCORD_TOKEN);
-
-// Lance le serveur OAuth Spotify
 startSpotifyServer();
