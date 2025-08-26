@@ -49,7 +49,7 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
       console.log('✅ Commands (guild) enregistrées pour', process.env.GUILD_ID);
     } else {
       await rest.put(
-        Routes.applicationCommands(process.env.DISCORD_CLIENT_ID),
+        Routes.applicationCommands(process.env.GUILD_ID, process.env.DISCORD_CLIENT_ID),
         { body: slashDefs },
       );
       console.log('✅ Commands (global) enregistrées');
