@@ -7,6 +7,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const token = process.env.DISCORD_TOKEN;
+const clientId = process.env.DISCORD_CLIENT_ID;
+const guildId = process.env.GUILD_ID;
+
 const commandsDir = path.join(__dirname, '..', 'src', 'commands');
 const files = fs.readdirSync(commandsDir).filter(f => f.endsWith('.js'));
 
