@@ -1,10 +1,6 @@
 import play from "play-dl";
+import { logToDiscord } from "./logger.js";
 
-/**
- * Résout une query -> { title, url, duration }
- * - si query est une URL supportée par play-dl, on prend direct
- * - sinon: recherche YouTube et prend le 1er résultat
- */
 export async function resolveTrack(query) {
   try {
     if (play.yt_validate(query) === "video") {
@@ -15,13 +11,14 @@ export async function resolveTrack(query) {
         duration: info.video_details.durationInSec,
       };
     }
-    // recherche YouTube
     const results = await play.search(query, { limit: 1, source: { youtube: "video" } });
     if (!results.length) return null;
     const v = results[0];
+    logToDiscord(`🔎 Résolu: ${v.title}`);
     return { title: v.title, url: v.url, duration: v.durationInSec };
   } catch (e) {
     console.error("resolveTrack error:", e);
+    logToDiscord(`❌ resolveTrack: ${e?.message || e}`);
     return null;
   }
 }

@@ -7,6 +7,7 @@ import {
   getVoiceConnection,
 } from "@discordjs/voice";
 import play from "play-dl";
+import { logToDiscord } from "../util/logger.js";
 
 export class GuildPlayer {
   constructor(guild, queue, textChannel) {
@@ -19,36 +20,47 @@ export class GuildPlayer {
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
 
-    this.player.on("stateChange", (oldState, newState) => {
-      // Auto next quand un track finit
-      if (oldState.status !== AudioPlayerStatus.Idle && newState.status === AudioPlayerStatus.Idle) {
+    this.player.on("stateChange", (oldS, newS) => {
+      // logs utiles
+      if (oldS.status !== newS.status) {
+        console.log(`[voice] ${oldS.status} -> ${newS.status}`);
+        logToDiscord(`[voice] ${oldS.status} → ${newS.status}`);
+      }
+      if (oldS.status !== AudioPlayerStatus.Idle && newS.status === AudioPlayerStatus.Idle) {
         this._playNext().catch(() => {});
       }
     });
 
     this.player.on("error", (err) => {
       console.error("AudioPlayer error:", err?.message || err);
+      logToDiscord(`❌ Audio error: ${err?.message || err}`);
       this._playNext().catch(() => {});
     });
   }
 
   ensureConnection(voiceChannel) {
     if (this.connection && this.connection.joinConfig.channelId === voiceChannel.id) return this.connection;
-    // (re)join
-    this.connection = joinVoiceChannel({
-      channelId: voiceChannel.id,
-      guildId: this.guild.id,
-      adapterCreator: this.guild.voiceAdapterCreator,
-      selfDeaf: true,
-    });
-    this.connection.subscribe(this.player);
+    try {
+      this.connection = joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId: this.guild.id,
+        adapterCreator: this.guild.voiceAdapterCreator,
+        selfDeaf: true,
+      });
+      this.connection.subscribe(this.player);
+      logToDiscord(`🔌 Joint ${voiceChannel.name}`);
+    } catch (e) {
+      console.error("joinVoiceChannel error:", e);
+      logToDiscord(`❌ joinVoiceChannel: ${e?.message || e}`);
+      throw e;
+    }
     return this.connection;
   }
 
   async addAndPlay(track, voiceChannel) {
     this.queue.push(track);
+    // si rien ne joue → démarre direct
     if (this.player.state.status === AudioPlayerStatus.Idle && this.queue.index === -1) {
-      // rien ne joue → démarre direct
       this.queue.index = 0;
       await this._playCurrent(voiceChannel);
       return "started";
@@ -57,31 +69,63 @@ export class GuildPlayer {
   }
 
   async _playCurrent(voiceChannel) {
-    if (!this.queue.current) return;
+    const cur = this.queue.current;
+    if (!cur) return;
     this.ensureConnection(voiceChannel);
 
-    // Récupère un stream avec play-dl (gère YouTube / yt music, etc.)
-    const { url } = this.queue.current;
-    const stream = await play.stream(url, { quality: 2 }); // 2 = bonne qualité / audio-only
-    const resource = createAudioResource(stream.stream, { inputType: stream.type });
+    logToDiscord(`🎶 Now playing: **${cur.title}**`);
 
-    this.player.play(resource);
+    // 1) tentative standard
+    try {
+      const stream = await play.stream(cur.url, { quality: 2 });
+      const resource = createAudioResource(stream.stream, { inputType: stream.type });
+      this.player.play(resource);
+      return;
+    } catch (e) {
+      console.error("play.stream error:", e?.message || e);
+      logToDiscord(`⚠️ stream failed → retry alt source`);
+    }
+
+    // 2) fallback: récupérer info puis stream_from_info
+    try {
+      const info = await play.video_info(cur.url);
+      const stream = await play.stream_from_info(info, { quality: 2 });
+      const resource = createAudioResource(stream.stream, { inputType: stream.type });
+      this.player.play(resource);
+      return;
+    } catch (e) {
+      console.error("stream_from_info error:", e?.message || e);
+    }
+
+    // 3) dernier fallback: rechercher un “audio” alternatif
+    try {
+      const results = await play.search(`${cur.title} audio`, { limit: 1, source: { youtube: "video" } });
+      if (results[0]?.url) {
+        const s = await play.stream(results[0].url, { quality: 2 });
+        const resource = createAudioResource(s.stream, { inputType: s.type });
+        this.player.play(resource);
+        logToDiscord(`🔁 Fallback source utilisée`);
+        return;
+      }
+    } catch {}
+
+    // si tout a échoué → passer au suivant
+    logToDiscord(`❌ Impossible de jouer: ${cur.title} — on skip`);
+    await this.skip();
   }
 
   async _playNext() {
     if (!this.queue.moveNext()) {
-      // plus rien → stop
       this.player.stop(true);
+      logToDiscord(`⏹️ File terminée`);
       return;
     }
-    // tente de rejouer la suite dans le même salon (si on peut)
     const vc = this._getBoundVoiceChannel();
     if (!vc) return;
     await this._playCurrent(vc);
   }
 
   _getBoundVoiceChannel() {
-    // Essaie de retrouver le salon vocal depuis la connection
     const conn = getVoiceConnection(this.guild.id);
     if (!conn) return null;
     const channelId = conn.joinConfig.channelId;
@@ -96,10 +140,5 @@ export class GuildPlayer {
     const conn = getVoiceConnection(this.guild.id);
     if (conn) conn.destroy();
   }
-
-  async skip() {
-    // Forcer fin de ressource -> déclenche stateChange → _playNext()
-    this.player.stop(true);
-  }
+  async skip() { this.player.stop(true); }
 }
-    

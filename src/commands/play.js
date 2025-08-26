@@ -1,5 +1,6 @@
 import { SlashCommandBuilder } from "discord.js";
 import { resolveTrack } from "../util/search.js";
+import { logToDiscord } from "../util/logger.js";
 
 export const data = new SlashCommandBuilder()
   .setName("play")
@@ -13,21 +14,29 @@ export async function execute(interaction, { states, createGuildState }) {
   const voice = member.voice.channel;
   if (!voice) return interaction.reply("❌ Rejoins un salon vocal d’abord.");
 
+  const me = await interaction.guild.members.fetchMe();
+  const perms = voice.permissionsFor(me);
+  if (!perms?.has("Connect") || !perms?.has("Speak")) {
+    return interaction.reply("⛔ Il me manque les permissions **Connect**/**Speak** dans ce vocal.");
+  }
+
   const query = interaction.options.getString("query", true);
   await interaction.deferReply();
 
   const track = await resolveTrack(query);
   if (!track) return interaction.editReply("❌ Rien trouvé pour ta recherche.");
 
-  const state = states.get(interaction.guild.id) || createGuildState();
-  const { player, queue } = state;
+  logToDiscord(`🎧 /play -> ${track.title} (${track.url})`);
 
-  const added = await player.addAndPlay(
+  const state = states.get(interaction.guild.id) || createGuildState();
+  const { player } = state;
+
+  const res = await player.addAndPlay(
     { ...track, requestedBy: interaction.user.tag },
     voice
   );
 
-  if (added === "started") {
+  if (res === "started") {
     return interaction.editReply(`▶️ **${track.title}** (demandé par ${interaction.user.tag})`);
   } else {
     return interaction.editReply(`➕ Ajouté à la file: **${track.title}**`);
