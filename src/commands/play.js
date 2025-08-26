@@ -42,4 +42,3 @@ export async function execute(interaction, { states, createGuildState }) {
     return interaction.editReply(`➕ Ajouté à la file: **${track.title}**`);
   }
 }
-
