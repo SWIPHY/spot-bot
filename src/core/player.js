@@ -131,14 +131,19 @@ export class GuildPlayer {
       console.error("search/alt error:", e?.message || e);
     }
 
-    // 4) dernier fallback: ytdl-core (webm/opus) avec cookie
+    // 4) dernier fallback: ytdl-core (webm/opus) SANS cookie IDENTITÉ
     try {
-      const headers = {};
-      if (process.env.YT_COOKIE) {
-        headers.cookie = process.env.YT_COOKIE;
-        headers["user-agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
-        headers["accept-language"] = "fr-FR,fr;q=0.9";
-      }
+      // On n’envoie le cookie à ytdl-core QUE si c’est un cookie "connecté"
+      const raw = process.env.YT_COOKIE || "";
+      const hasIdentity = /(SAPISID|__Secure-3PAPISID|PAPISID)=/.test(raw);
+
+      const headers = {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+        "accept-language": "fr-FR,fr;q=0.9",
+      };
+      if (hasIdentity) headers.cookie = raw; // sinon on n’en met PAS (évite l’erreur)
+
       const ystream = ytdl(cur.url, {
         filter: "audioonly",
         quality: "highestaudio",
@@ -146,19 +151,21 @@ export class GuildPlayer {
         dlChunkSize: 0,
         requestOptions: { headers },
       });
-      ystream.on("error", err => logToDiscord(`ytdl error: ${err?.message || err}`));
 
+      ystream.on("error", (err) =>
+        logToDiscord(`ytdl error: ${err?.message || err}`)
+      );
+
+      // on force un flux Opus pour éviter toute détection/ffmpeg
       const resource = this._makeResource(ystream, "webm/opus");
       this.player.play(resource);
-      logToDiscord(`🔁 Fallback ytdl-core utilisé`);
+      logToDiscord(
+        `🔁 Fallback ytdl-core utilisé${hasIdentity ? " (with cookie)" : " (no cookie)"}`
+      );
       return;
     } catch (e) {
       console.error("ytdl fallback error:", e?.message || e);
     }
-
-    // si tout a échoué → passer au suivant
-    logToDiscord(`❌ Impossible de jouer: ${cur.title} — on skip`);
-    await this.skip();
   }
 
   async _playNext() {
