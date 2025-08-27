@@ -196,4 +196,3 @@ export class GuildPlayer {
   }
   async skip() { this.player.stop(true); }
 }
-
