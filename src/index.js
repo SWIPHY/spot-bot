@@ -10,6 +10,18 @@ import { GuildPlayer } from './core/player.js';
 import { MusicQueue } from './core/queue.js';
 import play from "play-dl";
 
+const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
+if (process.env.YT_COOKIE) {
+  try {
+    play.setToken({
+      youtube: { cookie: process.env.YT_COOKIE, hl: "fr", gl: "FR", userAgent: ua },
+    });
+    console.log("✅ play-dl YouTube cookie initialisé");
+  } catch (e) {
+    console.warn("⚠️ setToken YouTube a échoué:", e?.message || e);
+  }
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -29,24 +41,6 @@ for (const f of fs.readdirSync(commandsDir).filter(f => f.endsWith('.js'))) {
     continue;
   }
   commands.set(name, mod);
-}
-
-// ====== CONFIG YOUTUBE ======
-const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
-if (process.env.YT_COOKIE) {
-  try {
-    play.setToken({
-      youtube: {
-        cookie: process.env.YT_COOKIE,
-        hl: "fr",
-        gl: "FR",
-        userAgent: ua,
-      },
-    });
-    console.log("✅ play-dl YouTube cookie initialisé");
-  } catch (e) {
-    console.warn("⚠️ setToken YouTube a échoué:", e?.message || e);
-  }
 }
 
 // ====== STATE PAR SERVEUR ======
