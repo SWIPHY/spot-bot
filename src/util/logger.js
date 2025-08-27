@@ -1,18 +1,25 @@
-let logChannel = null;
+let clientRef = null;
+let channelRef = null;
 
 export function initLogger(client) {
+  clientRef = client;
   const id = process.env.LOG_CHANNEL_ID;
-  if (!id) return;
+  if (!id) {
+    console.warn("LOG_CHANNEL_ID manquant → logs uniquement console.");
+    return;
+  }
   client.channels.fetch(id)
-    .then(ch => { logChannel = ch; })
-    .catch(err => console.error("Logger: impossible de trouver le salon", err));
+    .then(ch => { channelRef = ch; console.log("Logger prêt sur #", ch?.name || id); })
+    .catch(e => {
+      console.error("fetch LOG_CHANNEL_ID failed:", e?.message || e);
+    });
 }
 
-export function logToDiscord(msg) {
-  console.log(msg); // garde aussi en console Railway
-  if (logChannel) {
-    // tronque si trop long (>2000 char Discord max)
-    const safe = msg.length > 1900 ? msg.slice(0, 1900) + "..." : msg;
-    logChannel.send("📝 " + safe).catch(() => {});
+export function logToDiscord(content) {
+  if (channelRef) {
+    channelRef.send(typeof content === "string" ? content : "```json\n" + JSON.stringify(content, null, 2) + "\n```")
+      .catch(e => console.error("logToDiscord send failed:", e?.message || e));
+  } else {
+    console.log("[BOT-LOG]", content);
   }
 }
