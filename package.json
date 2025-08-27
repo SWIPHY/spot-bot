@@ -2,6 +2,9 @@
   "name": "spot-bot",
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "start": "node src/index.js",
     "register": "node scripts/register-commands.js"
@@ -15,5 +18,8 @@
     "spotify-web-api-node": "^5.0.2",
     "@discordjs/opus": "^0.10.0",
     "@discordjs/voice": "^0.19.0"
+  },
+  "optionalDependencies": {
+    "opusscript": "^0.0.8"
   }
 }
