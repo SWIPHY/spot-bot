@@ -8,6 +8,7 @@ import {
 } from "@discordjs/voice";
 import play from "play-dl";
 import { logToDiscord } from "../util/logger.js";
+import ytdl from "ytdl-core";
 
 export class GuildPlayer {
   constructor(guild, queue, textChannel) {
@@ -97,7 +98,7 @@ export class GuildPlayer {
       console.error("stream_from_info error:", e?.message || e);
     }
 
-    // 3) dernier fallback: rechercher un “audio” alternatif
+    // 3) fallback: rechercher un “audio” alternatif
     try {
       const results = await play.search(`${cur.title} audio`, { limit: 1, source: { youtube: "video" } });
       if (results[0]?.url) {
@@ -107,6 +108,26 @@ export class GuildPlayer {
         logToDiscord(`🔁 Fallback source utilisée`);
         return;
       }
+    } catch {}
+
+    // 4) dernier fallback: ytdl-core avec cookie
+    try {
+      const headers = {};
+      if (process.env.YT_COOKIE) {
+        headers["cookie"] = process.env.YT_COOKIE;
+        headers["user-agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124 Safari/537.36";
+        headers["accept-language"] = "fr-FR,fr;q=0.9";
+      }
+      const ystream = ytdl(cur.url, {
+        filter: "audioonly",
+        quality: "highestaudio",
+        requestOptions: { headers },
+        highWaterMark: 1 << 25,
+      });
+      const resource = createAudioResource(ystream);
+      this.player.play(resource);
+      logToDiscord(`🔁 Fallback ytdl-core utilisé`);
+      return;
     } catch {}
 
     // si tout a échoué → passer au suivant
