@@ -1,34 +1,26 @@
 export class MusicQueue {
   constructor(guildId) {
     this.guildId = guildId;
-    this.items = [];
-    this.index = -1; // rien en cours
+    this.tracks = [];
+    this.index = -1; // -1 = rien en cours
   }
-
-  push(track) {
-    this.items.push(track);
-  }
-
   get current() {
-    if (this.index < 0 || this.index >= this.items.length) return null;
-    return this.items[this.index];
+    return this.tracks[this.index] || null;
   }
-
+  push(track) {
+    this.tracks.push(track);
+  }
   moveNext() {
-    if (this.index + 1 < this.items.length) {
+    if (this.index + 1 < this.tracks.length) {
       this.index += 1;
       return true;
     }
+    // fin de file -> reset
+    this.clear();
     return false;
   }
-
   clear() {
-    this.items = [];
+    this.tracks = [];
     this.index = -1;
   }
-
-  get length() {
-    return this.items.length;
-  }
 }
-
