@@ -1,7 +1,9 @@
+// src/core/player.js
 import {
   joinVoiceChannel,
   createAudioPlayer,
   createAudioResource,
+  StreamType,
   AudioPlayerStatus,
   NoSubscriberBehavior,
   getVoiceConnection,
@@ -10,29 +12,8 @@ import play from "play-dl";
 import ytdl from "ytdl-core";
 import { logToDiscord } from "../util/logger.js";
 
-/** Construit des headers YouTube robustes (cookie seul possible) */
-function makeYTHeaders() {
-  const headers = {
-    // UA simple et stable
-    "user-agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    // Évite parfois un blocage régional
-    "accept-language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-    origin: "https://www.youtube.com",
-    referer: "https://www.youtube.com/",
-  };
-  // Cookie seul = OK. Le token est optionnel.
-  if (process.env.YT_COOKIE && process.env.YT_COOKIE.trim()) {
-    headers.cookie = process.env.YT_COOKIE.trim();
-  }
-  if (process.env.YT_ID_TOKEN && process.env.YT_ID_TOKEN.trim()) {
-    headers["x-youtube-identity-token"] = process.env.YT_ID_TOKEN.trim();
-  }
-  return headers;
-}
-
-// anti-boucle: n’autorise que N essais par piste
-const MAX_TRY_PER_TRACK = 3;
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 export class GuildPlayer {
   constructor(guild, queue, textChannel) {
@@ -71,20 +52,24 @@ export class GuildPlayer {
       this.connection.joinConfig.channelId === voiceChannel.id
     )
       return this.connection;
-    this.connection = joinVoiceChannel({
-      channelId: voiceChannel.id,
-      guildId: this.guild.id,
-      adapterCreator: this.guild.voiceAdapterCreator,
-      selfDeaf: true,
-    });
-    this.connection.subscribe(this.player);
-    logToDiscord(`🔌 Joint ${voiceChannel.name}`);
+    try {
+      this.connection = joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId: this.guild.id,
+        adapterCreator: this.guild.voiceAdapterCreator,
+        selfDeaf: true,
+      });
+      this.connection.subscribe(this.player);
+      logToDiscord(`🔌 Joint ${voiceChannel.name}`);
+    } catch (e) {
+      console.error("joinVoiceChannel error:", e);
+      logToDiscord(`❌ joinVoiceChannel: ${e?.message || e}`);
+      throw e;
+    }
     return this.connection;
   }
 
   async addAndPlay(track, voiceChannel) {
-    // marqueur anti-boucle
-    track.__tries = 0;
     this.queue.push(track);
     if (this.player.state.status === AudioPlayerStatus.Idle && this.queue.index === -1) {
       this.queue.index = 0;
@@ -97,48 +82,44 @@ export class GuildPlayer {
   async _playCurrent(voiceChannel) {
     const cur = this.queue.current;
     if (!cur) return;
-    this.ensureConnection(voiceChannel);
 
+    this.ensureConnection(voiceChannel);
     logToDiscord(`🎶 Now playing: **${cur.title}**`);
 
-    // 1) play-dl direct (sans video_info, qui déclenche souvent le challenge)
+    // --- Tentative A : play-dl standard (sans cookie obligatoire)
     try {
-      const s = await play.stream(cur.url, { quality: 2 }); // audio high
-      this.player.play(createAudioResource(s.stream, { inputType: s.type }));
+      const s = await play.stream(cur.url, { quality: 2 });
+      const res = createAudioResource(s.stream, { inputType: s.type });
+      this.player.play(res);
       return;
     } catch (e) {
       logToDiscord(`⚠️ play.stream error: ${e?.message || e}`);
     }
 
-    // 2) ytdl-core avec cookies (ne nécessite PAS x-youtube-identity-token)
+    // --- Tentative B : ytdl-core SANS COOKIE (IMPORTANT)
+    //   -> pas de header cookie, juste UA + langue pour éviter l'exigence x-youtube-identity-token
     try {
-      const resource = createAudioResource(
-        ytdl(cur.url, {
-          filter: "audioonly",
-          quality: "highestaudio",
-          highWaterMark: 1 << 25,
-          // 👉 force le bypass : pas besoin de x-youtube-identity-token
-          requestOptions: {
-            headers: {
-              "user-agent":
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-              "accept-language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-              cookie: process.env.YT_COOKIE || "",
-            },
+      const ystream = ytdl(cur.url, {
+        filter: "audioonly",
+        quality: "highestaudio",
+        highWaterMark: 1 << 25,
+        requestOptions: {
+          headers: {
+            "user-agent": UA,
+            "accept-language":
+              "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
           },
-        })
-      );
-
-      this.player.play(resource);
-      logToDiscord(`🔁 Fallback ytdl-core utilisé`);
+        },
+      });
+      const res = createAudioResource(ystream, { inputType: StreamType.Arbitrary });
+      this.player.play(res);
+      logToDiscord(`🔁 Fallback ytdl-core utilisé (sans cookie)`);
       return;
     } catch (e) {
-      const msg = e?.message || String(e);
-      // erreurs fréquentes: 410 / 403 / 429
-      logToDiscord(`⚠️ ytdl error: ${msg}`);
+      logToDiscord(`⚠️ ytdl error: ${e?.message || e}`);
     }
 
-    // 3) recherche d’une alternative “audio” (NCS, lyric, etc.)
+    // --- Tentative C : recherche alternative (sans boucle)
     try {
       const results = await play.search(`${cur.title} audio`, {
         limit: 1,
@@ -146,24 +127,16 @@ export class GuildPlayer {
       });
       if (results[0]?.url) {
         const s = await play.stream(results[0].url, { quality: 2 });
-        this.player.play(createAudioResource(s.stream, { inputType: s.type }));
-        logToDiscord(`🔁 Source alternative utilisée`);
+        const res = createAudioResource(s.stream, { inputType: s.type });
+        this.player.play(res);
+        logToDiscord(`🔁 Source alternative trouvée`);
         return;
       }
     } catch (e) {
       logToDiscord(`⚠️ alt search error: ${e?.message || e}`);
     }
 
-    // 4) anti-boucle / essais multiples
-    cur.__tries = (cur.__tries || 0) + 1;
-    if (cur.__tries < MAX_TRY_PER_TRACK) {
-      logToDiscord(`🔄 Retry (${cur.__tries}/${MAX_TRY_PER_TRACK})...`);
-      // petit délai pour éviter un spam d’erreurs
-      await new Promise((r) => setTimeout(r, 1200));
-      return this._playCurrent(voiceChannel);
-    }
-
-    // 5) abandon propre + passe au suivant
+    // Si tout échoue : skip
     logToDiscord(`❌ Impossible de jouer: ${cur.title} — skip`);
     await this.skip();
   }
@@ -184,7 +157,7 @@ export class GuildPlayer {
     if (!conn) return null;
     const channelId = conn.joinConfig.channelId;
     return this.guild.channels.cache.get(channelId) || null;
-  }
+    }
 
   pause() { this.player.pause(true); }
   resume() { this.player.unpause(); }
