@@ -2,6 +2,7 @@ import {
   joinVoiceChannel,
   createAudioPlayer,
   createAudioResource,
+  StreamType,
   AudioPlayerStatus,
   NoSubscriberBehavior,
   getVoiceConnection,
@@ -15,8 +16,8 @@ export class GuildPlayer {
     this.guild = guild;
     this.queue = queue;
     this.textChannel = textChannel;
-
     this.connection = null;
+
     this.player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
@@ -39,9 +40,7 @@ export class GuildPlayer {
   }
 
   ensureConnection(voiceChannel) {
-    if (this.connection && this.connection.joinConfig.channelId === voiceChannel.id) {
-      return this.connection;
-    }
+    if (this.connection && this.connection.joinConfig.channelId === voiceChannel.id) return this.connection;
     this.connection = joinVoiceChannel({
       channelId: voiceChannel.id,
       guildId: this.guild.id,
@@ -49,7 +48,6 @@ export class GuildPlayer {
       selfDeaf: true,
     });
     this.connection.subscribe(this.player);
-    logToDiscord(`🔌 Joint ${voiceChannel.name}`);
     return this.connection;
   }
 
@@ -66,23 +64,23 @@ export class GuildPlayer {
   async _playCurrent(voiceChannel) {
     const cur = this.queue.current;
     if (!cur) return;
-    this.ensureConnection(voiceChannel);
 
+    this.ensureConnection(voiceChannel);
     logToDiscord(`🎶 Now playing: **${cur.title}**`);
 
+    // Essai avec play-dl
     try {
-      // 🔹 play-dl stream
       const stream = await play.stream(cur.url, { quality: 2 });
       const resource = createAudioResource(stream.stream, { inputType: stream.type });
       this.player.play(resource);
       return;
     } catch (e) {
-      console.error("play-dl error:", e?.message || e);
-      logToDiscord(`⚠️ play-dl stream failed, trying ytdl-core`);
+      console.error("play-dl stream error:", e.message);
+      logToDiscord(`⚠️ play-dl failed → trying fallback`);
     }
 
+    // Fallback avec ytdl-core
     try {
-      // 🔹 fallback ytdl-core
       const headers = {};
       if (process.env.YT_COOKIE) {
         headers["cookie"] = process.env.YT_COOKIE;
@@ -94,24 +92,23 @@ export class GuildPlayer {
         requestOptions: { headers },
         highWaterMark: 1 << 25,
       });
-      const resource = createAudioResource(ystream);
+      const resource = createAudioResource(ystream, { inputType: StreamType.Arbitrary });
       this.player.play(resource);
-      logToDiscord(`🔁 Fallback ytdl-core utilisé`);
+      logToDiscord("🔁 Fallback ytdl-core utilisé");
       return;
     } catch (e) {
-      console.error("ytdl-core error:", e?.message || e);
-      logToDiscord(`❌ ytdl-core fail: ${e?.message}`);
+      console.error("ytdl-core error:", e.message);
+      logToDiscord(`❌ Fallback ytdl-core failed: ${e.message}`);
     }
 
-    // 🔹 skip si rien n’a marché
-    logToDiscord(`❌ Impossible de jouer: ${cur.title} — skipped`);
+    logToDiscord(`❌ Impossible de jouer: ${cur.title} — skip`);
     await this.skip();
   }
 
   async _playNext() {
     if (!this.queue.moveNext()) {
       this.player.stop(true);
-      logToDiscord(`⏹️ File terminée`);
+      logToDiscord("⏹️ File terminée");
       return;
     }
     const vc = this._getBoundVoiceChannel();
