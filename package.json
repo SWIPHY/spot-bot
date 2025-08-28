@@ -2,25 +2,23 @@
   "name": "spot-bot",
   "version": "1.0.0",
   "type": "module",
-  "engines": {
-    "node": "20.x"
-  },
+  "private": true,
+  "description": "Discord music bot + Spotify link (Railway ready)",
+  "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "register": "node scripts/register-commands.js"
   },
   "dependencies": {
-    "@discordjs/voice": "^0.17.0",
+    "@discordjs/voice": "0.17.0",
     "discord.js": "^14.15.3",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "lyrics-finder": "^21.7.0",
-    "opusscript": "^0.0.8",
     "play-dl": "^1.9.7",
-    "spotify-web-api-node": "^5.0.2",
-    "ytdl-core": "^4.11.5"
+    "ytdl-core": "^4.11.5",
+    "express": "^4.19.2"
   },
   "overrides": {
-    "@discordjs/opus": "npm:opusscript@^0.0.8"
+    "@discordjs/voice": "0.17.0",
+    "@discordjs/opus": "npm:@evan/empty-package@1.0.0"
   }
 }
