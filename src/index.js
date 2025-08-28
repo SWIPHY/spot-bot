@@ -1,114 +1,142 @@
-// src/index.js
 import 'dotenv/config';
-import { Client, GatewayIntentBits, Partials, Events } from 'discord.js';
-import play from 'play-dl';
+import express from 'express';
+import {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  Collection,
+  REST,
+  Routes,
+  EmbedBuilder,
+} from 'discord.js';
+import { getOrCreateGuildPlayer } from './core/player.js';
+import { resolveTrack } from './resolveTrack.js';
+import { logToDiscord } from './util/logger.js';
 
-/* ----------------------------- ENV CHECKS ----------------------------- */
-function checkEnv() {
-  const required = ['DISCORD_TOKEN', 'YT_COOKIE'];
-  let ok = true;
+const app = express();
+app.get('/', (_req, res) => res.send('OK'));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('[web] listening on', PORT));
 
-  for (const key of required) {
-    if (!process.env[key] || !String(process.env[key]).trim()) {
-      console.error(`❌ [ENV] Variable manquante: ${key}`);
-      ok = false;
-    }
-  }
-
-  if (!ok) throw new Error('Certaines variables d’environnement sont manquantes.');
-
-  console.log(`✅ [ENV] YT_COOKIE chargé (${process.env.YT_COOKIE.length} chars)`);
-  if (process.env.YT_ID_TOKEN) {
-    console.log(`✅ [ENV] YT_ID_TOKEN trouvé (${process.env.YT_ID_TOKEN.length} chars)`);
-  } else {
-    console.warn('⚠️ [ENV] Pas de YT_ID_TOKEN — risque de 403/410 sur certains liens.');
-  }
-}
-checkEnv();
-
-/* ------------------------ play-dl: configuration ----------------------- */
-// On passe le cookie (et l’ID token si présent) à play-dl.
-// NB: pas d’erreur si YT_ID_TOKEN est absent — juste moins fiable.
-try {
-  await play.setToken({
-    youtube: {
-      cookie: process.env.YT_COOKIE,
-      identity_token: process.env.YT_ID_TOKEN || undefined,
-    },
-  });
-  console.log('✅ [play-dl] Tokens YouTube configurés.');
-} catch (e) {
-  console.error('❌ [play-dl] setToken a échoué:', e?.message || e);
-}
-
-/* ------------------------------ DISCORD ------------------------------- */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildVoiceStates, // nécessaire pour la voix
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,   // si tu lis des messages (pas requis pour les slash cmds)
+    GatewayIntentBits.GuildVoiceStates,
   ],
   partials: [Partials.Channel],
 });
 
-client.once(Events.ClientReady, (c) => {
-  console.log(`✅ Connecté en tant que ${c.user.tag}`);
-});
+globalThis.discordClient = client;
 
-/* ------------------------- ROUTAGE DES COMMANDES ---------------------- */
-/**
- * Ce routeur charge “en douceur” tes handlers si les fichiers existent.
- * - ./commands/play.js   -> export default async function (interaction) {}
- * - ./commands/stop.js
- * - ./commands/skip.js
- * Si un fichier manque, on ne crashe pas : on répond proprement.
- */
-async function loadHandler(name) {
-  try {
-    const mod = await import(`./commands/${name}.js`);
-    return mod?.default || mod?.run || null;
-  } catch {
-    return null;
-  }
-}
+client.commands = new Collection();
 
-client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand?.()) return;
+// ---- Commandes en mémoire (play / stop / skip / pause / resume)
+client.commands.set('play', {
+  data: { name: 'play', description: 'Jouer une musique via mot-clé ou URL', options: [{ name: 'query', type: 3, description: 'Recherche ou URL', required: true }] },
+  async execute(interaction) {
+    await interaction.deferReply({ ephemeral: false });
+    const query = interaction.options.getString('query', true).trim();
 
-  try {
-    const cmd = interaction.commandName;
-
-    // Log minimal
-    console.log(`➡️ /${cmd} par ${interaction.user.tag} dans #${interaction.channel?.name || '?'}`);
-
-    const handler = await loadHandler(cmd);
-    if (!handler) {
-      await interaction.reply({ content: `❌ Commande \`/${cmd}\` indisponible sur ce déploiement.`, ephemeral: true });
+    let track;
+    try {
+      track = await resolveTrack(query);
+    } catch (e) {
+      await interaction.editReply('❌ Oups, erreur pendant la résolution du titre (check logs).');
+      await logToDiscord(`resolveTrack error: ${e?.message || e}`);
       return;
     }
 
-    // Exécuter le handler — il gère déjà ses propres erreurs normalement.
-    await handler(interaction);
+    if (!track) {
+      await interaction.editReply('❌ Rien trouvé pour ta recherche.');
+      return;
+    }
+
+    // Voice channel de l’utilisateur
+    const member = await interaction.guild.members.fetch(interaction.user.id);
+    const voiceChannel = member?.voice?.channel;
+    if (!voiceChannel) {
+      await interaction.editReply('❌ Tu dois être connecté(e) à un salon vocal.');
+      return;
+    }
+
+    try {
+      const gp = getOrCreateGuildPlayer(interaction.guild, interaction.channel);
+      const status = await gp.addAndPlay(track, voiceChannel);
+
+      const emb = new EmbedBuilder()
+        .setColor(0x00e0ff)
+        .setDescription(status === 'started'
+          ? `▶️ **Je joue**: ${track.title}`
+          : `➕ **Ajouté à la file**: ${track.title}`)
+        .setURL(track.url);
+
+      await interaction.editReply({ embeds: [emb] });
+    } catch (e) {
+      await interaction.editReply('❌ Erreur /play: une erreur interne s’est produite.');
+      await logToDiscord(`Erreur /play: ${e?.message || e}`);
+    }
+  },
+});
+
+client.commands.set('stop', {
+  data: { name: 'stop', description: 'Stopper et vider la file' },
+  async execute(interaction) {
+    await interaction.deferReply();
+    const gp = getOrCreateGuildPlayer(interaction.guild, interaction.channel);
+    gp.stop();
+    await interaction.editReply('🛑 Lecture arrêtée & file vidée.');
+  },
+});
+
+client.commands.set('skip', {
+  data: { name: 'skip', description: 'Passer au suivant' },
+  async execute(interaction) {
+    await interaction.deferReply();
+    const gp = getOrCreateGuildPlayer(interaction.guild, interaction.channel);
+    await gp.skip();
+    await interaction.editReply('⏭️ Skip demandé.');
+  },
+});
+
+client.commands.set('pause', {
+  data: { name: 'pause', description: 'Mettre en pause' },
+  async execute(interaction) {
+    await interaction.deferReply();
+    const gp = getOrCreateGuildPlayer(interaction.guild, interaction.channel);
+    gp.pause();
+    await interaction.editReply('⏸️ Pause.');
+  },
+});
+
+client.commands.set('resume', {
+  data: { name: 'resume', description: 'Reprendre' },
+  async execute(interaction) {
+    await interaction.deferReply();
+    const gp = getOrCreateGuildPlayer(interaction.guild, interaction.channel);
+    gp.resume();
+    await interaction.editReply('▶️ Reprise.');
+  },
+});
+
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  const cmd = client.commands.get(interaction.commandName);
+  if (!cmd) return;
+  try {
+    await cmd.execute(interaction);
   } catch (err) {
-    console.error('❌ Erreur interaction:', err?.stack || err);
+    await logToDiscord(`Erreur interaction: ${err?.message || err}`);
     if (interaction.deferred || interaction.replied) {
-      await interaction.followUp({ content: '❌ Oups, erreur interne.', ephemeral: true }).catch(() => {});
+      await interaction.editReply('❌ Oups, erreur interne.');
     } else {
-      await interaction.reply({ content: '❌ Oups, erreur interne.', ephemeral: true }).catch(() => {});
+      await interaction.reply({ content: '❌ Oups, erreur interne.', ephemeral: true });
     }
   }
 });
 
-/* ------------------------------ LIFECYCLE ----------------------------- */
-process.on('unhandledRejection', (reason) => {
-  console.error('⚠️ UnhandledRejection:', reason);
-});
-process.on('uncaughtException', (err) => {
-  console.error('⚠️ UncaughtException:', err);
+client.once('ready', () => {
+  console.log(`[bot] connecté en tant que ${client.user.tag}`);
+  logToDiscord('✅ Bot prêt.');
 });
 
-client.login(process.env.DISCORD_TOKEN).catch((e) => {
-  console.error('❌ Login Discord échoué:', e?.message || e);
-  process.exit(1);
-});
+client.login(process.env.DISCORD_TOKEN);
