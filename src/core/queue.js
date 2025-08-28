@@ -31,3 +31,4 @@ export class MusicQueue {
     return this.items.length;
   }
 }
+
