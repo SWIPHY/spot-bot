@@ -1,26 +1,38 @@
 import play from "play-dl";
+import { logToDiscord } from "./logger.js";
+
+// Petite aide pour reconnaître une URL YouTube
+const YT_REGEX =
+  /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\//i;
 
 export async function resolveTrack(query) {
   try {
-    // Si c’est une URL
-    if (query.startsWith("http")) {
-      const info = await play.video_info(query);
+    // URL YouTube directe
+    if (YT_REGEX.test(query)) {
+      const info = await play.video_basic_info(query);
+      const v = info?.video_details;
+      if (!v?.url) return null;
       return {
-        title: info.video_details.title,
-        url: info.video_details.url,
+        title: v.title || "Titre inconnu",
+        url: v.url,
+        duration: v.durationInSec || 0,
       };
     }
 
-    // Sinon, recherche
-    const results = await play.search(query, { limit: 1, source: { youtube: "video" } });
-    if (!results.length) return null;
-
+    // Recherche mots-clés
+    const res = await play.search(query, {
+      limit: 1,
+      source: { youtube: "video" },
+    });
+    if (!res.length) return null;
+    const it = res[0];
     return {
-      title: results[0].title,
-      url: results[0].url,
+      title: it.title,
+      url: it.url,
+      duration: it.durationInSec || 0,
     };
   } catch (e) {
-    console.error("resolveTrack error:", e.message);
-    return null;
+    logToDiscord(`❌ resolveTrack: ${e?.message || e}`);
+    throw e;
   }
 }

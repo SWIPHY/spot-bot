@@ -1,43 +1,105 @@
-import { SlashCommandBuilder } from "discord.js";
+import {
+  SlashCommandBuilder,
+  PermissionFlagsBits,
+} from "discord.js";
+import { MusicQueue } from "../core/queue.js";
+import { GuildPlayer } from "../core/player.js";
+import { resolveTrack } from "../util/resolveTrack.js";
 import { logToDiscord } from "../util/logger.js";
-import { resolveTrack } from "../util/track-resolver.js";
+
+// Fallback local si l'app ne fournit pas ctx.states
+const _localStates = new Map();
+function ensureState(guild, textChannel, statesFromCtx, createFromCtx) {
+  if (statesFromCtx && createFromCtx) {
+    let s = statesFromCtx.get(guild.id);
+    if (!s || !s.player) {
+      const queue = new MusicQueue(guild.id);
+      const player = new GuildPlayer(guild, queue, textChannel);
+      s = { queue, player };
+      statesFromCtx.set(guild.id, s);
+    }
+    return s;
+  }
+  // fallback local
+  let s = _localStates.get(guild.id);
+  if (!s || !s.player) {
+    const queue = new MusicQueue(guild.id);
+    const player = new GuildPlayer(guild, queue, textChannel);
+    s = { queue, player };
+    _localStates.set(guild.id, s);
+  }
+  return s;
+}
 
 export const data = new SlashCommandBuilder()
   .setName("play")
-  .setDescription("Joue une musique depuis YouTube")
-  .addStringOption(o =>
-    o.setName("query")
-     .setDescription("Lien YouTube ou recherche")
-     .setRequired(true)
-  );
+  .setDescription("Joue un son depuis YouTube (URL ou mots-clés)")
+  .addStringOption((o) =>
+    o
+      .setName("query")
+      .setDescription("URL YouTube ou recherche")
+      .setRequired(true)
+  )
+  .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages);
 
 export async function execute(interaction, ctx) {
-  const query = interaction.options.getString("query");
-  const voiceChannel = interaction.member?.voice.channel;
-
-  if (!voiceChannel) {
-    return interaction.reply({ content: "❌ Tu dois être dans un salon vocal.", ephemeral: true });
-  }
-
-  await interaction.deferReply();
-
   try {
-    const track = await resolveTrack(query);
-    if (!track) {
-      await interaction.editReply("❌ Rien trouvé pour ta recherche.");
-      return;
+    const member = await interaction.guild.members.fetch(
+      interaction.user.id
+    );
+    const voice = member.voice?.channel;
+    if (!voice) {
+      return interaction.reply({
+        content: "❌ Tu dois être en vocal.",
+        ephemeral: true,
+      });
     }
 
-    const status = await ctx.player.addAndPlay(track, voiceChannel);
+    const query = interaction.options.getString("query", true).trim();
+    await interaction.deferReply(); // on montre pas d’erreur interne au moindre délai
 
-    await interaction.editReply({
-      content: `${status === "started" ? "▶️ Lecture" : "➕ Ajouté"} : ${track.title} (${track.url})`
-    });
+    // Résolution du titre/URL
+    let track;
+    try {
+      track = await resolveTrack(query);
+    } catch (e) {
+      logToDiscord(
+        `❌ Erreur interaction: While getting info from url\n${e?.message || e}`
+      );
+      return interaction.editReply(
+        "❌ Oups, erreur pendant la résolution du titre (check logs)."
+      );
+    }
 
-    logToDiscord(`🎵 /play -> ${track.title} (${track.url})`);
+    if (!track) {
+      return interaction.editReply("❌ Rien trouvé pour ta recherche.");
+    }
+
+    // State + player garantis
+    const state = ensureState(
+      interaction.guild,
+      interaction.channel,
+      ctx?.states,
+      ctx?.createGuildState
+    );
+
+    const res = await state.player.addAndPlay(track, voice);
+    const prefix = res === "queued" ? "➕ Ajouté à la file :" : "▶️ Je joue :";
+    await interaction.editReply(
+      `${prefix} **${track.title}**\n${track.url}`
+    );
+    logToDiscord(
+      `🎧 /play -> ${track.title} (${track.url}) (demandé par ${interaction.user.username})`
+    );
   } catch (e) {
-    console.error("Erreur /play:", e);
-    logToDiscord(`❌ Erreur /play: ${e.message}`);
-    await interaction.editReply("❌ Oups, erreur interne.");
+    logToDiscord(`❌ Erreur /play: ${e?.message || e}`);
+    console.error(e);
+    if (interaction.deferred || interaction.replied) {
+      return interaction.editReply("❌ Oups, erreur interne.");
+    }
+    return interaction.reply({
+      content: "❌ Oups, erreur interne.",
+      ephemeral: true,
+    });
   }
 }
