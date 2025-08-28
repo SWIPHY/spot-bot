@@ -10,7 +10,7 @@ import {
   EmbedBuilder,
 } from 'discord.js';
 import { getOrCreateGuildPlayer } from './core/player.js';
-import { resolveTrack } from './resolveTrack.js';
+import { resolveTrack } from './util/resolveTrack.js';
 import { logToDiscord } from './util/logger.js';
 
 const app = express();
