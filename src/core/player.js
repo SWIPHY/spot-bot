@@ -11,34 +11,24 @@ import play from "play-dl";
 import ytdl from "ytdl-core";
 import { logToDiscord } from "../util/logger.js";
 
-/* ---------- utils ---------- */
-
-function pickBestAudioFormat(info) {
-  // privilégie opus/webm, sinon meilleur audio-only
-  const formats = info?.formats || [];
-  const opus = formats
-    .filter(f => f.audioCodec?.includes("opus") && !f.hasVideo)
-    .sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0));
-  if (opus[0]) return opus[0];
-
-  const audioOnly = formats
-    .filter(f => !f.hasVideo && (f.audioBitrate || 0) > 0)
-    .sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0));
-  return audioOnly[0] || null;
-}
-
 function ytHeaders() {
-  const h = {
+  const headers = {
     "user-agent":
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
     "accept-language": "fr-FR,fr;q=0.9,en;q=0.8",
   };
-  if (process.env.YT_COOKIE) h.cookie = process.env.YT_COOKIE;
-  if (process.env.YT_ID_TOKEN) h["x-youtube-identity-token"] = process.env.YT_ID_TOKEN;
-  return h;
+  if (process.env.YT_COOKIE) headers.cookie = process.env.YT_COOKIE;
+  if (process.env.YT_ID_TOKEN) headers["x-youtube-identity-token"] = process.env.YT_ID_TOKEN;
+  return headers;
 }
 
-/* ---------- player ---------- */
+function pickBestAudioFormat(info) {
+  const fmts = info?.formats?.filter(f => f.hasAudio && !f.hasVideo);
+  if (!fmts?.length) return null;
+  // privilégie opus/webm sinon m4a
+  const opus = fmts.find(f => /audio\/webm/.test(f.mimeType));
+  return opus || fmts[0];
+}
 
 export class GuildPlayer {
   constructor(guild, queue, textChannel) {
@@ -50,9 +40,6 @@ export class GuildPlayer {
     this.player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
-
-    // pour limiter les retries par vidéo (éviter boucles)
-    this.failMap = new Map(); // key=url, value=tryCount
 
     this.player.on("stateChange", (oldS, newS) => {
       if (oldS.status !== newS.status) {
@@ -107,18 +94,18 @@ export class GuildPlayer {
 
     logToDiscord(`🎶 Now playing: **${cur.title}**`);
 
-    // 1) tentative standard via play-dl
+    // 1) play-dl (avec cookies/idToken si fournis)
     try {
       const stream = await play.stream(cur.url, { quality: 2 });
       const resource = createAudioResource(stream.stream, { inputType: stream.type });
       this.player.play(resource);
       return;
     } catch (e) {
-      console.error("play.stream error:", e?.message || e);
+      console.warn("play.stream error:", e?.message || e);
       logToDiscord(`⚠️ play.stream error: ${e?.message || e}`);
     }
 
-    // 2) play-dl from info
+    // 2) play-dl: video_info + stream_from_info (second essai)
     try {
       const info = await play.video_info(cur.url);
       const stream = await play.stream_from_info(info, { quality: 2 });
@@ -126,81 +113,66 @@ export class GuildPlayer {
       this.player.play(resource);
       return;
     } catch (e) {
-      console.error("play.stream_from_info error:", e?.message || e);
+      console.warn("play.stream_from_info error:", e?.message || e);
       logToDiscord(`⚠️ play.stream_from_info error: ${e?.message || e}`);
     }
 
-    // 3) fallback ytdl-core + cookies + retry 410/403
-    try {
-      await this._playWithYTDL(cur.url);
-      logToDiscord(`🔁 Fallback ytdl-core utilisé (cookie ${process.env.YT_COOKIE ? "+ identity token" : ""})`);
-      return;
-    } catch (e) {
-      console.error("ytdl fallback error:", e?.message || e);
-      logToDiscord(`❌ ytdl error: ${e?.message || e}`);
-    }
-
-    // échec → skip
-    logToDiscord(`❌ Impossible de jouer: ${cur.title} — skip`);
-    await this.skip();
+    // 3) Fallback ytdl-core — 1 retry «410» max
+    await this._playWithYTDL(cur.url);
   }
 
   async _playWithYTDL(url) {
     const headers = ytHeaders();
-    const key = url;
-    const tryCount = this.failMap.get(key) || 0;
-    if (tryCount > 2) throw new Error("Too many retries");
+    let retried = false;
 
-    const attempt = async (useInfoFlow = false) => {
-      if (!useInfoFlow) {
-        const ystream = ytdl(url, {
-          filter: "audioonly",
-          quality: "highestaudio",
-          requestOptions: { headers },
-          highWaterMark: 1 << 25,
-          liveBuffer: 4000,
-        });
-
-        // 👉 capter les 410/403 au niveau du flux
-        ystream.on("error", (err) => {
-          const msg = String(err?.message || err);
-          if (/410|403/.test(msg)) {
-            logToDiscord(`🔄 Flux expiré (${msg}), retry avec getInfo`);
-            this.failMap.set(key, tryCount + 1);
-            attempt(true).catch(e2 => {
-              logToDiscord(`❌ retry getInfo a échoué: ${e2?.message || e2}`);
-              this.skip();
-            });
-          }
-        });
-
-        const resource = createAudioResource(ystream, { inputType: StreamType.Arbitrary });
-        this.player.play(resource);
-        return;
-      } else {
+    const start = async () => {
+      try {
+        // getInfo pour éviter d’avoir un format expiré
         const info = await ytdl.getInfo(url, { requestOptions: { headers } });
         const fmt = pickBestAudioFormat(info);
-        if (!fmt) throw new Error("No audio format found");
+        if (!fmt) throw new Error("No audio-only format found");
 
         const ystream = ytdl.downloadFromInfo(info, {
           requestOptions: { headers },
           quality: fmt.itag,
           highWaterMark: 1 << 25,
-          liveBuffer: 4000,
         });
 
-        ystream.on("error", (err) => {
+        ystream.on("error", async (err) => {
           const msg = String(err?.message || err);
-          logToDiscord(`❌ ytdl info-stream error: ${msg}`);
+          logToDiscord(`❗ ytdl error: ${msg}`);
+          if (!retried && /410|403/.test(msg)) {
+            retried = true;
+            logToDiscord(`🔄 Flux expiré (Status ${msg.match(/\d+/)?.[0] || "??"}), retry getInfo`);
+            try {
+              const info2 = await ytdl.getInfo(url, { requestOptions: { headers } });
+              const fmt2 = pickBestAudioFormat(info2);
+              if (!fmt2) throw new Error("No audio format on retry");
+              const s2 = ytdl.downloadFromInfo(info2, {
+                requestOptions: { headers },
+                quality: fmt2.itag,
+                highWaterMark: 1 << 25,
+              });
+              this.player.play(createAudioResource(s2, { inputType: StreamType.Arbitrary }));
+            } catch (e2) {
+              logToDiscord(`❌ retry getInfo a échoué: ${e2?.message || e2}`);
+              await this.skip();
+            }
+          } else {
+            await this.skip();
+          }
         });
 
-        const resource = createAudioResource(ystream, { inputType: StreamType.Arbitrary });
-        this.player.play(resource);
-        return;
+        this.player.play(createAudioResource(ystream, { inputType: StreamType.Arbitrary }));
+        logToDiscord(`🔁 Fallback ytdl-core utilisé (cookie${headers["x-youtube-identity-token"] ? " + id" : ""})`);
+      } catch (e) {
+        const msg = e?.message || e;
+        logToDiscord(`❌ ytdl getInfo failed: ${msg}`);
+        await this.skip();
       }
     };
 
-    await attempt(false);
+    await start();
   }
 
   async _playNext() {
