@@ -1,44 +1,74 @@
+// src/commands/play.js
 import { SlashCommandBuilder } from "discord.js";
-import { resolveTrack } from "../util/search.js";
+import play from "play-dl";
 import { logToDiscord } from "../util/logger.js";
 
 export const data = new SlashCommandBuilder()
   .setName("play")
-  .setDescription("Joue une musique (YouTube URL ou recherche)")
+  .setDescription("Joue une musique (URL YouTube ou recherche texte)")
   .addStringOption(o =>
-    o.setName("query").setDescription("URL ou recherche").setRequired(true)
+    o.setName("query")
+     .setDescription("URL YouTube ou mots-clés")
+     .setRequired(true)
   );
 
-export async function execute(interaction, { states, createGuildState }) {
-  const member = await interaction.guild.members.fetch(interaction.user.id);
-  const voice = member.voice.channel;
-  if (!voice) return interaction.reply("❌ Rejoins un salon vocal d’abord.");
-
-  const me = await interaction.guild.members.fetchMe();
-  const perms = voice.permissionsFor(me);
-  if (!perms?.has("Connect") || !perms?.has("Speak")) {
-    return interaction.reply("⛔ Il me manque les permissions **Connect**/**Speak** dans ce vocal.");
+export async function execute(interaction, ctx) {
+  // sécurité + UX
+  const query = interaction.options.getString("query", true);
+  const vc = interaction.member?.voice?.channel;
+  if (!vc) {
+    return interaction.reply({ content: "❌ Rejoins un salon vocal d’abord.", ephemeral: true });
   }
 
-  const query = interaction.options.getString("query", true);
-  await interaction.deferReply();
+  await interaction.deferReply(); // évite le timeout Discord
 
-  const track = await resolveTrack(query);
-  if (!track) return interaction.editReply("❌ Rien trouvé pour ta recherche.");
+  // récupère/crée l’état du serveur (queue + player)
+  let state = ctx.states.get(interaction.guildId);
+  if (!state) {
+    state = ctx.createGuildState(interaction.guild, interaction.channel);
+    ctx.states.set(interaction.guildId, state);
+  }
 
-  logToDiscord(`🎧 /play -> ${track.title} (${track.url})`);
+  try {
+    // ————— Résolution du morceau —————
+    let url = null;
+    let title = null;
 
-  const state = states.get(interaction.guild.id) || createGuildState();
-  const { player } = state;
+    // si l'user colle une URL YouTube valide
+    if (play.yt_validate(query) === "video") {
+      const info = await play.video_info(query);
+      url = info.video_details.url;
+      title = info.video_details.title;
+    } else {
+      // sinon on cherche sur YouTube
+      const results = await play.search(query, {
+        limit: 1,
+        source: { youtube: "video" },
+      });
+      if (results.length === 0) {
+        return interaction.editReply("❌ Rien trouvé pour ta recherche.");
+      }
+      url = results[0].url;
+      title = results[0].title;
+    }
 
-  const res = await player.addAndPlay(
-    { ...track, requestedBy: interaction.user.tag },
-    voice
-  );
+    // track minimal (player.js n’a besoin que de ça)
+    const track = { title, url };
 
-  if (res === "started") {
-    return interaction.editReply(`▶️ **${track.title}** (demandé par ${interaction.user.tag})`);
-  } else {
-    return interaction.editReply(`➕ Ajouté à la file: **${track.title}**`);
+    // ajoute et lance
+    const res = await state.player.addAndPlay(track, vc);
+    if (res === "started") {
+      await interaction.editReply(`▶️ **Je joue :** ${title}\n${url}`);
+    } else {
+      await interaction.editReply(`➕ **Ajouté à la file :** ${title}`);
+    }
+
+    logToDiscord(`🎧 /play -> ${title} (${url})`);
+  } catch (e) {
+    console.error("play command error:", e);
+    logToDiscord(`❌ Erreur interaction: ${e?.message || e}`);
+    try {
+      await interaction.editReply("❌ Oups, erreur interne.");
+    } catch {}
   }
 }
