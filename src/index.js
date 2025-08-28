@@ -12,6 +12,23 @@ import {
 import { getOrCreateGuildPlayer } from './core/player.js';
 import { resolveTrack } from './util/resolveTrack.js';
 import { logToDiscord } from './util/logger.js';
+import playdl from "play-dl";
+
+const YT_COOKIE = process.env.YT_COOKIE?.trim();
+const YT_ID = process.env.YT_CLIENT_ID?.trim(); // c’est ton x-youtube-identity-token
+
+if (YT_COOKIE) {
+  // Donne les credentials à play-dl (ils seront utilisés pour toutes les requêtes)
+  playdl.setToken({
+    youtube: {
+      cookie: YT_COOKIE,
+      identityToken: YT_ID || undefined,
+    },
+  });
+  console.log("[yt] play-dl: cookie + identity token configurés");
+} else {
+  console.warn("[yt] ATTENTION: pas de YT_COOKIE dans l'env");
+}
 
 const app = express();
 app.get('/', (_req, res) => res.send('OK'));

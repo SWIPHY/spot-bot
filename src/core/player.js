@@ -77,93 +77,82 @@ export class GuildPlayer {
   async _playCurrent(voiceChannel) {
     const cur = this.queue.current;
     if (!cur) return;
+
     this.ensureConnection(voiceChannel);
+    logToDiscord(`🎶 Now playing: **${cur.title}**`);
 
-    await logToDiscord(`🎶 Now playing: **${cur.title}**`);
-    const maxAttempts = 3;
-    let attempt = 0;
+    // anti-boucle: 3 essais max par piste
+    cur._retries ??= 0;
+    const maxRetries = 3;
+    const isExpired410 = (e) =>
+      e?.statusCode === 410 ||
+      /status\s*code\s*:\s*410/i.test(e?.message || "");
 
-    const cookie = process.env.YT_COOKIE?.trim();
-    const idToken = process.env.YT_ID_TOKEN?.trim();
-
-    // helper: crée une resource depuis stream
-    const playResource = (stream, typeOverride) => {
-      const resource = createAudioResource(stream, { inputType: typeOverride || StreamType.Arbitrary });
-      this.player.play(resource);
-    };
-
-    // A) play-dl
-    while (attempt < maxAttempts) {
-      try {
-        attempt++;
-        const opt = { quality: 2 };
-        if (cookie) opt.cookie = cookie;
-        if (idToken) opt.headers = { 'x-youtube-identity-token': idToken };
-
-        const s = await play.stream(cur.url, opt);
-        playResource(s.stream, s.type);
-        return;
-      } catch (e) {
-        const msg = String(e?.message || e);
-        await logToDiscord(`⚠️ play.stream error: ${msg}`);
-        // 410/429 → on retente en ajustant
-        if (msg.includes('410') && attempt < maxAttempts) continue;
-        break;
-      }
-    }
-
-    // B) play-dl via info
+    // ---------- ESSAI 1 : play.stream ----------
     try {
-      const info = await play.video_info(cur.url, cookie ? { cookie } : {});
-      const s2 = await play.stream_from_info(info, cookie ? { cookie } : {});
-      playResource(s2.stream, s2.type);
+      const s1 = await play.stream(cur.url, { quality: 2 });
+      const res1 = createAudioResource(s1.stream, { inputType: s1.type });
+      this.player.play(res1);
       return;
     } catch (e) {
-      await logToDiscord(`⚠️ play.stream_from_info error: ${e?.message || e}`);
+      cur._retries++;
+      console.warn("play.stream error:", e?.message || e);
+      logToDiscord(`⚠️ play.stream error: ${e?.message || e}`);
+      if (!isExpired410(e) && cur._retries >= maxRetries) {
+        logToDiscord("🛑 trop d'essais — skip");
+        await this.skip();
+        return;
+      }
     }
 
-    // C) ytdl-core, avec headers si dispos
+    // ---------- ESSAI 2 : video_info -> stream_from_info ----------
     try {
-      const headers = {};
-      if (cookie) headers['cookie'] = cookie;
-      if (idToken) headers['x-youtube-identity-token'] = idToken;
-      if (cookie || idToken) {
-        await logToDiscord('🔁 Fallback ytdl-core utilisé (cookie + identity token)');
-      } else {
-        await logToDiscord('🔁 Fallback ytdl-core utilisé (no cookie)');
+      const info = await play.video_info(cur.url);
+      const s2 = await play.stream_from_info(info, { quality: 2 });
+      const res2 = createAudioResource(s2.stream, { inputType: s2.type });
+      this.player.play(res2);
+      return;
+    } catch (e) {
+      cur._retries++;
+      console.warn("play.stream_from_info error:", e?.message || e);
+      logToDiscord(`⚠️ play.stream_from_info error: ${e?.message || e}`);
+      if (!isExpired410(e) && cur._retries >= maxRetries) {
+        logToDiscord("🛑 trop d'essais — skip");
+        await this.skip();
+        return;
       }
+    }
+
+    // ---------- ESSAI 3 : ytdl-core avec headers ----------
+    try {
+      const headers = {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+        "accept-language": "fr-FR,fr;q=0.9",
+      };
+      if (process.env.YT_COOKIE) headers.cookie = process.env.YT_COOKIE.trim();
+      if (process.env.YT_CLIENT_ID)
+        headers["x-youtube-identity-token"] = process.env.YT_CLIENT_ID.trim();
 
       const ystream = ytdl(cur.url, {
-        filter: 'audioonly',
-        quality: 'highestaudio',
+        filter: "audioonly",
+        quality: "highestaudio",
         highWaterMark: 1 << 25,
         requestOptions: { headers },
       });
 
-      ystream.on('error', (err) => {
-        logToDiscord(`ytdl error: ${err?.message || err}`);
-      });
-
-      playResource(ystream);
+      const res3 = createAudioResource(ystream /* , { inputType: StreamType.Arbitrary } */);
+      this.player.play(res3);
+      logToDiscord(`🔁 Fallback ytdl-core utilisé (cookie${process.env.YT_CLIENT_ID ? " + identity" : ""})`);
       return;
     } catch (e) {
-      await logToDiscord(`ytdl fatal: ${e?.message || e}`);
+      cur._retries++;
+      console.warn("ytdl error:", e?.message || e);
+      logToDiscord(`⚠️ ytdl error: ${e?.message || e}`);
     }
 
-    // D) dernier essai: recherche alternative (titre + "audio")
-    try {
-      const res = await play.search(`${cur.title} audio`, { limit: 1, source: { youtube: 'video' } });
-      if (res?.[0]?.url) {
-        const s = await play.stream(res[0].url, cookie ? { cookie } : {});
-        playResource(s.stream, s.type);
-        await logToDiscord('🔁 Source alternative utilisée');
-        return;
-      }
-    } catch (e) {
-      await logToDiscord(`alt search error: ${e?.message || e}`);
-    }
-
-    await logToDiscord(`❌ Impossible de jouer: ${cur.title} — skip`);
+    // ---------- si tout a échoué ----------
+    logToDiscord(`❌ Impossible de jouer: ${cur.title} — skip`);
     await this.skip();
   }
 
