@@ -1,105 +1,78 @@
 import {
   SlashCommandBuilder,
+  ChannelType,
   PermissionFlagsBits,
 } from "discord.js";
-import { MusicQueue } from "../core/queue.js";
-import { GuildPlayer } from "../core/player.js";
-import { resolveTrack } from "../util/resolveTrack.js";
+import { resolveTrack } from "../util/search.js";
 import { logToDiscord } from "../util/logger.js";
-
-// Fallback local si l'app ne fournit pas ctx.states
-const _localStates = new Map();
-function ensureState(guild, textChannel, statesFromCtx, createFromCtx) {
-  if (statesFromCtx && createFromCtx) {
-    let s = statesFromCtx.get(guild.id);
-    if (!s || !s.player) {
-      const queue = new MusicQueue(guild.id);
-      const player = new GuildPlayer(guild, queue, textChannel);
-      s = { queue, player };
-      statesFromCtx.set(guild.id, s);
-    }
-    return s;
-  }
-  // fallback local
-  let s = _localStates.get(guild.id);
-  if (!s || !s.player) {
-    const queue = new MusicQueue(guild.id);
-    const player = new GuildPlayer(guild, queue, textChannel);
-    s = { queue, player };
-    _localStates.set(guild.id, s);
-  }
-  return s;
-}
 
 export const data = new SlashCommandBuilder()
   .setName("play")
-  .setDescription("Joue un son depuis YouTube (URL ou mots-clés)")
+  .setDescription("Lire un morceau depuis un mot-clé ou une URL YouTube")
   .addStringOption((o) =>
     o
       .setName("query")
-      .setDescription("URL YouTube ou recherche")
+      .setDescription("Mot-clé ou URL YouTube")
       .setRequired(true)
-  )
-  .setDefaultMemberPermissions(PermissionFlagsBits.SendMessages);
+  );
 
 export async function execute(interaction, ctx) {
-  try {
-    const member = await interaction.guild.members.fetch(
-      interaction.user.id
-    );
-    const voice = member.voice?.channel;
-    if (!voice) {
-      return interaction.reply({
-        content: "❌ Tu dois être en vocal.",
-        ephemeral: true,
-      });
-    }
+  const query = interaction.options.getString("query", true);
 
-    const query = interaction.options.getString("query", true).trim();
-    await interaction.deferReply(); // on montre pas d’erreur interne au moindre délai
+  // Trouver / créer l'état et le player
+  const guild = interaction.guild;
+  const me = guild.members.me;
+  const member = await guild.members.fetch(interaction.user.id);
 
-    // Résolution du titre/URL
-    let track;
-    try {
-      track = await resolveTrack(query);
-    } catch (e) {
-      logToDiscord(
-        `❌ Erreur interaction: While getting info from url\n${e?.message || e}`
-      );
-      return interaction.editReply(
-        "❌ Oups, erreur pendant la résolution du titre (check logs)."
-      );
-    }
-
-    if (!track) {
-      return interaction.editReply("❌ Rien trouvé pour ta recherche.");
-    }
-
-    // State + player garantis
-    const state = ensureState(
-      interaction.guild,
-      interaction.channel,
-      ctx?.states,
-      ctx?.createGuildState
-    );
-
-    const res = await state.player.addAndPlay(track, voice);
-    const prefix = res === "queued" ? "➕ Ajouté à la file :" : "▶️ Je joue :";
-    await interaction.editReply(
-      `${prefix} **${track.title}**\n${track.url}`
-    );
-    logToDiscord(
-      `🎧 /play -> ${track.title} (${track.url}) (demandé par ${interaction.user.username})`
-    );
-  } catch (e) {
-    logToDiscord(`❌ Erreur /play: ${e?.message || e}`);
-    console.error(e);
-    if (interaction.deferred || interaction.replied) {
-      return interaction.editReply("❌ Oups, erreur interne.");
-    }
+  const voice = member.voice?.channel;
+  if (!voice) {
     return interaction.reply({
-      content: "❌ Oups, erreur interne.",
+      content: "❌ Tu dois être dans un salon vocal.",
       ephemeral: true,
     });
+  }
+  if (
+    !voice
+      .permissionsFor(me)
+      .has([
+        PermissionFlagsBits.Connect,
+        PermissionFlagsBits.Speak,
+        PermissionFlagsBits.ViewChannel,
+      ])
+  ) {
+    return interaction.reply({
+      content: "❌ Je n'ai pas les permissions pour parler/rejoindre ce salon.",
+      ephemeral: true,
+    });
+  }
+
+  await interaction.deferReply(); // évite le timeout même si la recherche prend un peu
+
+  // State par serveur
+  const state =
+    ctx.states.get(guild.id) ||
+    ctx.createGuildState(guild, interaction.channel);
+
+  try {
+    // Résolution SANS appeler play.video_info (évite captcha)
+    const track = await resolveTrack(query);
+
+    // Ajout + éventuellement démarrage
+    const status = await state.player.addAndPlay(track, voice);
+    const msg =
+      status === "started"
+        ? `▶️ **Je joue**: ${track.title}`
+        : `➕ **Ajouté à la file**: ${track.title}`;
+    await interaction.editReply(msg);
+    logToDiscord(`/play -> ${track.title} (${track.url})`);
+  } catch (e) {
+    if (e?.code === "NO_RESULTS") {
+      await interaction.editReply("❌ Rien trouvé pour ta recherche.");
+    } else {
+      await interaction.editReply(
+        "❌ Oups, erreur pendant la résolution du titre (check logs)."
+      );
+      logToDiscord(`❌ Erreur /play: ${e?.message || e}`);
+    }
   }
 }
