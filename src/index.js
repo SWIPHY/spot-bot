@@ -8,6 +8,8 @@ import { startSpotifyServer } from "./spotify-server.js";
 import { initLogger, logToDiscord } from "./util/logger.js";
 import { MusicQueue } from "./core/queue.js";
 import { GuildPlayer } from "./core/player.js";
+import ffmpegPath from "ffmpeg-static";
+if (ffmpegPath) process.env.FFMPEG_PATH = ffmpegPath;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
