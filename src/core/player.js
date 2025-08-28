@@ -96,24 +96,37 @@ export class GuildPlayer {
       logToDiscord(`⚠️ play.stream error: ${e?.message || e}`);
     }
 
-    // --- Tentative B : ytdl-core SANS COOKIE (IMPORTANT)
-    //   -> pas de header cookie, juste UA + langue pour éviter l'exigence x-youtube-identity-token
+    // --- Tentative B : ytdl-core avec ou sans cookie + identity token
     try {
+      const headers = {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "accept-language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+        // ces deux-là ne sont ajoutés que si .env les fournit
+        ...(process.env.YT_COOKIE && process.env.YT_ID_TOKEN
+          ? {
+              cookie: process.env.YT_COOKIE,
+              "x-youtube-identity-token": process.env.YT_ID_TOKEN,
+              origin: "https://www.youtube.com",
+              referer: "https://www.youtube.com/",
+            }
+          : {}),
+      };
+
       const ystream = ytdl(cur.url, {
         filter: "audioonly",
         quality: "highestaudio",
         highWaterMark: 1 << 25,
-        requestOptions: {
-          headers: {
-            "user-agent": UA,
-            "accept-language":
-              "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-          },
-        },
+        requestOptions: { headers },
       });
+
       const res = createAudioResource(ystream, { inputType: StreamType.Arbitrary });
       this.player.play(res);
-      logToDiscord(`🔁 Fallback ytdl-core utilisé (sans cookie)`);
+      logToDiscord(
+        process.env.YT_COOKIE && process.env.YT_ID_TOKEN
+          ? "🔁 Fallback ytdl-core utilisé (cookie + identity token)"
+          : "🔁 Fallback ytdl-core utilisé (sans cookie)"
+      );
       return;
     } catch (e) {
       logToDiscord(`⚠️ ytdl error: ${e?.message || e}`);
