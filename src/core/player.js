@@ -11,8 +11,12 @@ import play from 'play-dl';
 import ytdl from 'ytdl-core';
 import { Queue } from './queue.js';
 import { logToDiscord } from '../util/logger.js';
-import ffmpeg from "ffmpeg-static";
-process.env.FFMPEG_PATH = ffmpeg;
+import { ffmpegCmd } from '../util/ffmpeg.js';
+import ffmpegStatic from 'ffmpeg-static';
+
+// Fixe la variable si elle ne l’a pas été (double sécurité)
+process.env.FFMPEG_PATH = process.env.FFMPEG_PATH || ffmpegStatic || 'ffmpeg';
+console.log(`[ffmpeg] FFMPEG_PATH=${process.env.FFMPEG_PATH}`);
 
 const players = new Map(); // guildId -> GuildPlayer
 

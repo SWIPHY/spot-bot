@@ -14,6 +14,9 @@ import { resolveTrack } from './util/resolveTrack.js';
 import { logToDiscord } from './util/logger.js';
 import playdl from "play-dl";
 import { execSync } from "node:child_process";
+import { ensureFfmpeg } from './util/ffmpeg.js';
+await ensureFfmpeg(); // fixe process.env.FFMPEG_PATH et log le chemin retenu
+
 try {
   const v = execSync("ffmpeg -version", { stdio: ["ignore","pipe","ignore"] })
     .toString().split("\n")[0];
