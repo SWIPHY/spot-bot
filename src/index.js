@@ -13,6 +13,14 @@ import { getOrCreateGuildPlayer } from './core/player.js';
 import { resolveTrack } from './util/resolveTrack.js';
 import { logToDiscord } from './util/logger.js';
 import playdl from "play-dl";
+import { execSync } from "node:child_process";
+try {
+  const v = execSync("ffmpeg -version", { stdio: ["ignore","pipe","ignore"] })
+    .toString().split("\n")[0];
+  console.log("[ffmpeg] OK ->", v);
+} catch {
+  console.error("[ffmpeg] introuvable !");
+}
 
 const YT_COOKIE = process.env.YT_COOKIE?.trim();
 const YT_ID = process.env.YT_CLIENT_ID?.trim(); // c’est ton x-youtube-identity-token
