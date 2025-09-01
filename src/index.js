@@ -55,7 +55,6 @@ const client = new Client({
 });
 
 globalThis.discordClient = client;
-
 client.commands = new Collection();
 
 // ---- Commandes en mémoire (play / stop / skip / pause / resume)

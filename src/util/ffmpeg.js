@@ -30,3 +30,4 @@ export async function ensureFfmpeg() {
 export function ffmpegCmd() {
   return process.env.FFMPEG_PATH || 'ffmpeg';
 }
+
