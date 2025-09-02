@@ -1,43 +1,46 @@
+import {
+  EmbedBuilder,
+  Colors,
+} from "discord.js";
+
 let clientRef = null;
-let logChannelId = null;
+let channelId = null;
 
-/** Initialise la journalisation Discord (canal de logs) */
-export async function initLogger(client, channelId) {
+export function initLogger(client, logChannelId) {
   clientRef = client;
-  logChannelId = channelId || process.env.LOG_CHANNEL_ID || null;
-
-  // Accroche les consoles pour tout voir dans Railway ET Discord
-  const origLog = console.log;
-  const origWarn = console.warn;
-  const origErr = console.error;
-
-  console.log = (...args) => {
-    origLog(...args);
-    sendToDiscord("🟢 LOG", args.join(" "), "info");
-  };
-  console.warn = (...args) => {
-    origWarn(...args);
-    sendToDiscord("🟠 WARN", args.join(" "), "warn");
-  };
-  console.error = (...args) => {
-    origErr(...args);
-    sendToDiscord("🔴 ERROR", args.join(" "), "error");
-  };
+  channelId = logChannelId || null;
 }
 
-/** Envoie un message dans le canal de logs (si configuré) */
+function color(level) {
+  switch (level) {
+    case "error": return Colors.Red;
+    case "warn":  return Colors.Yellow;
+    case "info":  return Colors.Blurple;
+    default:      return Colors.Greyple;
+  }
+}
+
 export async function logToDiscord(title, message, { level = "info" } = {}) {
-  await sendToDiscord(title, message, level);
-}
+  // console
+  const prefix = level.toUpperCase();
+  if (level === "error") console.error(`[${prefix}] ${title}:`, message);
+  else if (level === "warn") console.warn(`[${prefix}] ${title}:`, message);
+  else console.log(`[${prefix}] ${title}:`, message);
 
-async function sendToDiscord(title, message, level) {
+  // channel
   try {
-    if (!clientRef || !logChannelId) return;
-    const ch = await clientRef.channels.fetch(logChannelId).catch(() => null);
+    if (!clientRef || !channelId) return;
+    const ch = await clientRef.channels.fetch(channelId).catch(() => null);
     if (!ch) return;
-    const prefix = level === "error" ? "❌" : level === "warn" ? "⚠️" : "ℹ️";
-    await ch.send(`${prefix} **${title}**\n\`\`\`\n${(message ?? "").toString().slice(0, 1900)}\n\`\`\``);
-  } catch (_) {
-    // on évite toute boucle d'erreur de log
+
+    const embed = new EmbedBuilder()
+      .setColor(color(level))
+      .setTitle(title)
+      .setDescription(typeof message === "string" ? message.slice(0, 4000) : "—")
+      .setTimestamp(new Date());
+
+    await ch.send({ embeds: [embed] });
+  } catch (e) {
+    console.error("[LOGGER] send failed:", e);
   }
 }

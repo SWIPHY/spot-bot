@@ -1,24 +1,18 @@
-import { ensureFfmpeg } from "./util/ffmpeg.js";
-await ensureFfmpeg();
-
 import "dotenv/config";
 import express from "express";
-import {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  REST,
-  Routes,
-  SlashCommandBuilder
-} from "discord.js";
-import getOrCreateGuildPlayer from "./core/player.js";
-import resolveTrack from "./util/resolveTrack.js";
+import { Client, GatewayIntentBits, Partials } from "discord.js";
+import { ensureFfmpeg } from "./util/ffmpeg.js";
 import { initLogger, logToDiscord } from "./util/logger.js";
+import resolveTrack from "./util/resolveTrack.js";
+import getOrCreateGuildPlayer from "./core/player.js";
 import play from "play-dl";
 
-// ---------- YouTube (cookies) ----------
-const YT_COOKIE = process.env.YT_COOKIE?.trim();
-const YT_ID = process.env.YT_CLIENT_ID?.trim(); // x-youtube-identity-token
+// --------- Boot ----------
+await ensureFfmpeg();
+
+// Cookies / Identity token pour play-dl (YouTube)
+const YT_COOKIE = (process.env.YT_COOKIE || "").trim();
+const YT_ID = (process.env.YT_CLIENT_ID || "").trim();
 if (YT_COOKIE) {
   play.setToken({
     youtube: {
@@ -27,106 +21,72 @@ if (YT_COOKIE) {
     },
   });
   console.log("[yt] play-dl: cookie + identity token configurés");
-} else {
-  console.warn("[yt] ATTENTION: pas de YT_COOKIE dans l'env");
 }
 
-// ---------- Discord client ----------
+// HTTP keepalive (Railway)
+const app = express();
+app.get("/", (_, res) => res.send("ok"));
+const PORT = Number(process.env.PORT || 8080);
+app.listen(PORT, () => console.log(`[web] listening on ${PORT}`));
+
+// Discord client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildVoiceStates
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages
   ],
   partials: [Partials.Channel]
 });
 
+initLogger(client, process.env.LOG_CHANNEL_ID);
+
+// ready
 client.once("ready", async () => {
-  await initLogger(client, process.env.LOG_CHANNEL_ID);
-  console.log(`[bot] connecté en tant que ${client.user.tag}`);
+  await logToDiscord("bot", `connecté en tant que ${client.user.tag}`, { level: "info" });
 });
 
-// ---------- Slash command /play (auto-register si GUILD_ID présent) ----------
-async function registerCommands() {
+// slash interactions (play/stop minimalistes)
+// Adapte si tu as déjà ton système de commandes.
+client.on("interactionCreate", async (i) => {
   try {
-    const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
-    const commands = [
-      new SlashCommandBuilder()
-        .setName("play")
-        .setDescription("Lire un titre YouTube (url ou mots-clés)")
-        .addStringOption(o => o.setName("query").setDescription("URL ou recherche").setRequired(true)),
-      new SlashCommandBuilder()
-        .setName("stop")
-        .setDescription("Arrête et vide la file")
-    ].map(c => c.toJSON());
+    if (!i.isChatInputCommand()) return;
 
-    if (process.env.GUILD_ID) {
-      await rest.put(
-        Routes.applicationGuildCommands(process.env.DISCORD_CLIENT_ID, process.env.GUILD_ID),
-        { body: commands }
-      );
-      console.log("[slash] commandes (guild) enregistrées");
-    } else {
-      await rest.put(
-        Routes.applicationCommands(process.env.DISCORD_CLIENT_ID),
-        { body: commands }
-      );
-      console.log("[slash] commandes (global) enregistrées");
-    }
-  } catch (err) {
-    console.warn("[slash] register error:", err?.message || err);
-  }
-}
-await registerCommands();
+    if (i.commandName === "play") {
+      const query = i.options.getString("query", true);
+      await i.deferReply({ ephemeral: false });
 
-// ---------- Handlers ----------
-client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
+      const track = await resolveTrack(query);           // {title,url}
+      const member = await i.guild.members.fetch(i.user.id);
+      const vc = member.voice.channel;
+      if (!vc) return i.editReply("Rejoins un salon vocal d’abord.");
 
-  try {
-    if (interaction.commandName === "play") {
-      const query = interaction.options.getString("query");
+      const gp = getOrCreateGuildPlayer(i.guild, i.channel);
+      gp.connect(vc);
+      await gp.addAndPlay(track);
 
-      // must be in a voice channel
-      const voice = interaction.member?.voice?.channel;
-      if (!voice) {
-        return interaction.reply({ content: "🔊 Rejoins un salon vocal d'abord.", ephemeral: true });
-      }
-
-      await interaction.deferReply();
-
-      const track = await resolveTrack(query);
-      const gp = getOrCreateGuildPlayer(interaction.guild, interaction.channel);
-      await gp.join(voice);
-      gp.enqueue(track);
-
-      await interaction.editReply(`▶️ Ajouté à la file : **${track.title}**`);
-      return;
+      return i.editReply(`▶️ **${track.title}**`);
     }
 
-    if (interaction.commandName === "stop") {
-      const gp = getOrCreateGuildPlayer(interaction.guild, interaction.channel);
+    if (i.commandName === "stop") {
+      const gp = getOrCreateGuildPlayer(i.guild, i.channel);
       gp.stop();
-      return interaction.reply("⏹️ Arrêté.");
+      return i.reply({ content: "⏹️ Stop.", ephemeral: false });
     }
   } catch (err) {
-    await interaction.reply({ content: "❌ Oups, erreur pendant la résolution du titre.", ephemeral: true }).catch(() => {});
-    await logToDiscord("Erreur interaction", err?.stack || String(err), { level: "error" });
+    await logToDiscord("Unhandled interaction", err?.stack || String(err), { level: "error" });
+    if (i.isRepliable()) {
+      try { await i.reply({ content: "❌ Erreur.", ephemeral: true }); } catch {}
+    }
   }
 });
 
-// ---------- Logs process ----------
-process.on("unhandledRejection", (reason) =>
-  logToDiscord("UnhandledRejection", String(reason?.stack || reason), { level: "error" })
+// garde-fous
+process.on("unhandledRejection", (r) =>
+  logToDiscord("UnhandledRejection", String(r?.stack || r), { level: "error" })
 );
-process.on("uncaughtException", (err) =>
-  logToDiscord("UncaughtException", String(err?.stack || err), { level: "error" })
+process.on("uncaughtException", (e) =>
+  logToDiscord("UncaughtException", String(e?.stack || e), { level: "error" })
 );
 
-// ---------- Keep-alive web ----------
-const app = express();
-const PORT = process.env.PORT || 8080;
-app.get("/", (_, res) => res.send("Bot en ligne."));
-app.listen(PORT, () => console.log(`[web] listening on ${PORT}`));
-
-// ---------- Login ----------
 client.login(process.env.DISCORD_TOKEN);
