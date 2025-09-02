@@ -59,8 +59,11 @@ const client = new Client({
 
 client.commands = new Collection();
 
-client.once("ready", () => {
-  console.log(`[bot] connecté en tant que ${client.user.tag}`);
+client.once("ready", (c) => {
+  console.log('[bot] connecté en tant que', c.user.tag);
+});
+client.once("clientReady", (c) => {
+  console.log('[bot] connecté en tant que', c.user.tag);
 });
 
 // --- Exemple d’implémentation /play pour test -----------------------
