@@ -8,7 +8,7 @@ import {
   Collection,
 } from "discord.js";
 import { getOrCreateGuildPlayer } from "./core/player.js";
-import resolveTrack from "./util/resolveTrack.js";
+import { resolveTrack } from "./util/resolveTrack.js";
 import { logToDiscord } from "./util/logger.js";
 import playdl from "play-dl";
 import { execSync } from "node:child_process";
