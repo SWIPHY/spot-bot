@@ -7,7 +7,7 @@ import {
   Partials,
   Collection,
 } from "discord.js";
-import getOrCreateGuildPlayer from "./core/player.js";
+import { getOrCreateGuildPlayer } from "./core/player.js";
 import resolveTrack from "./util/resolveTrack.js";
 import { logToDiscord } from "./util/logger.js";
 import playdl from "play-dl";
