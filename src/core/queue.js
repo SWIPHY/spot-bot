@@ -16,7 +16,7 @@ export async function execute(interaction, { states }) {
   }
 
   const q = state.queue; // ta classe Queue (items + index + current)
-
+  
   // On formate les 15 premières entrées
   const lines = q.items
     .map((t, i) => {
