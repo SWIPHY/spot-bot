@@ -1,50 +1,66 @@
-import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
-
-/**
- * /queue — Affiche la file d'attente
- * On s'attend à ce que `states` soit une Map<guildId, { queue: Queue }>
- * où Queue possède: items[], index (int), current (getter)
- */
-export const data = new SlashCommandBuilder()
-  .setName("queue")
-  .setDescription("Affiche la file d'attente du serveur");
-
-export async function execute(interaction, { states }) {
-  const state = states.get(interaction.guildId);
-  if (!state || !state.queue || state.queue.items.length === 0) {
-    return interaction.reply({ content: "📭 File vide.", ephemeral: true });
+export class Queue {
+  constructor() {
+    this.items = [];   // Tableau de morceaux
+    this.index = -1;   // Position du morceau courant
   }
 
-  const q = state.queue; // ta classe Queue (items + index + current)
-  
-  // On formate les 15 premières entrées
-  const lines = q.items
-    .map((t, i) => {
-      const isCurrent = i === q.index;
-      const pos = String(i + 1).padStart(2, "0");
-      const who = t.requestedBy ? ` — _${t.requestedBy}_` : "";
-      const title = t.title ?? "Unknown";
-      return `${isCurrent ? "🔊" : "　"} **${pos}.** ${title}${who}`;
-    })
-    .slice(0, 15);
+  // Retourne le morceau en cours
+  get current() {
+    return this.items[this.index] || null;
+  }
 
-  // Si plus d’éléments, on l’indique
-  const more =
-    q.items.length > 15
-      ? `\n… et ${q.items.length - 15} autre(s) élément(s) dans la file.`
-      : "";
+  // Ajoute un morceau à la file
+  push(track) {
+    this.items.push(track);
+  }
 
-  const now = q.current
-    ? `**En cours :** ${q.current.title ?? "Unknown"}`
-    : "Aucun morceau en cours.";
+  // Passe au morceau suivant (true si ok, false si fin de file)
+  moveNext() {
+    if (this.index + 1 < this.items.length) {
+      this.index++;
+      return true;
+    }
+    return false;
+  }
 
-  const embed = new EmbedBuilder()
-    .setColor(0x00b894)
-    .setTitle("🎶 File d’attente")
-    .setDescription([now, "", lines.join("\n"), more].join("\n"))
-    .setFooter({
-      text: `Total: ${q.items.length} • Index: ${q.index < 0 ? "—" : q.index + 1}`,
-    });
+  // Passe au morceau précédent (true si ok, false si début de file)
+  movePrevious() {
+    if (this.index - 1 >= 0) {
+      this.index--;
+      return true;
+    }
+    return false;
+  }
 
-  return interaction.reply({ embeds: [embed] });
+  // Réinitialise la file
+  clear() {
+    this.items = [];
+    this.index = -1;
+  }
+
+  // Va directement à une position donnée
+  jump(pos) {
+    if (pos >= 0 && pos < this.items.length) {
+      this.index = pos;
+      return true;
+    }
+    return false;
+  }
+
+  // Supprime un élément à une position donnée
+  remove(pos) {
+    if (pos >= 0 && pos < this.items.length) {
+      this.items.splice(pos, 1);
+      if (this.index >= this.items.length) {
+        this.index = this.items.length - 1;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  // Vérifie si la file est vide
+  isEmpty() {
+    return this.items.length === 0;
+  }
 }
