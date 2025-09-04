@@ -1,73 +1,110 @@
 import "dotenv/config";
-import { Client, GatewayIntentBits, Collection, InteractionType } from "discord.js";
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { startSpotifyServer } from "./spotify-server.js";
-import { initLogger, makeLogger } from "./util/logger.js";
+import express from "express";
+import {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  Collection,
+  REST,
+  Routes,
+  EmbedBuilder
+} from "discord.js";
+import { ensureFfmpeg } from "./util/ffmpeg.js";
+import { logToDiscord } from "./util/logger.js";
 import getOrCreateGuildPlayer from "./core/player.js";
-import { resolveTrack } from "./util/resolveTrack.js";
+import resolveTrack from "./util/resolveTrack.js";
+import play from "play-dl";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// --- FFmpeg
+await ensureFfmpeg();
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
-});
-
-// --- Chargement commandes dynamiques ---
-const commands = new Collection();
-const commandsDir = path.join(__dirname, "commands");
-for (const f of fs.readdirSync(commandsDir).filter((f) => f.endsWith(".js"))) {
-  const mod = await import(path.join(commandsDir, f));
-  const name = mod.data?.name || mod.name;
-  if (!name || !mod.execute) {
-    console.warn("⚠️ commande ignorée:", f);
-    continue;
-  }
-  commands.set(name, mod);
+// --- play-dl (YouTube cookie + identity token)
+const YT_COOKIE = process.env.YT_COOKIE?.trim();
+const YT_ID = process.env.YT_CLIENT_ID?.trim(); // x-youtube-identity-token
+if (YT_COOKIE) {
+  play.setToken({
+    youtube: {
+      cookie: YT_COOKIE,
+      identityToken: YT_ID || undefined
+    }
+  });
+  console.log("[yt] play-dl: cookie + identity token configurés");
+} else {
+  console.warn("[yt] ATTENTION: pas de YT_COOKIE dans l'env");
 }
 
-client.once("ready", () => {
-  console.log(`✅ Connecté en ${client.user.tag}`);
-  initLogger(client);
+// --- Discord client
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates
+  ],
+  partials: [Partials.Channel]
 });
 
-// --- Gestion des interactions ---
+// états par serveur: Map<guildId, { queue: Queue }>
+const states = new Collection();
+
+// prêt
+client.once("ready", async () => {
+  console.log(`[bot] connecté en tant que ${client.user.tag}`);
+  await logToDiscord(client, "INFO", `[bot] connecté en tant que ${client.user.tag}`);
+});
+
+// interaction slash: /play <query>
 client.on("interactionCreate", async (interaction) => {
-  const logger = makeLogger(client);
+  if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName !== "play") return;
+
+  const query = interaction.options.getString("query", true);
+  const member = await interaction.guild.members.fetch(interaction.user.id);
+  const voice = member?.voice?.channel;
+
+  if (!voice) {
+    return interaction.reply({ content: "❌ Tu dois être en vocal.", ephemeral: true });
+  }
+
+  // état du guild
+  if (!states.has(interaction.guildId)) {
+    states.set(interaction.guildId, { queue: null });
+  }
+  const state = states.get(interaction.guildId);
 
   try {
-    if (interaction.type === InteractionType.ApplicationCommandAutocomplete) {
-      const c = commands.get(interaction.commandName);
-      if (c?.autocomplete) return c.autocomplete(interaction);
-      return;
+    await interaction.deferReply({ ephemeral: false });
+
+    const track = await resolveTrack(query);
+    track.requestedBy = interaction.user.username;
+
+    // queue
+    if (!state.queue) {
+      const { Queue } = await import("./core/queue.js");
+      state.queue = new Queue();
     }
 
-    if (!interaction.isChatInputCommand()) return;
-    const cmd = commands.get(interaction.commandName);
-    if (!cmd?.execute) return interaction.reply({ content: "Commande inconnue.", ephemeral: true });
+    // player
+    const gp = getOrCreateGuildPlayer(interaction.guild, interaction.channel, client);
+    gp.setQueue(state.queue);
+    await gp.connect(voice);
+    await gp.playOrEnqueue(track);
 
-    // Contexte custom
-    const ctx = {
-      client,
-      logger,
-      getPlayer: (ch) => getOrCreateGuildPlayer(interaction.guild, ch, logger),
-      resolveTrack,
-    };
+    const emb = new EmbedBuilder()
+      .setColor(0x00b894)
+      .setDescription(`▶️ **Je joue**: ${track.title}`);
 
-    await cmd.execute(interaction, ctx);
-  } catch (e) {
-    logger.error({ title: "interaction error", desc: e?.message || e });
-    if (interaction.deferred || interaction.replied) {
-      interaction.editReply("❌ Erreur interne.");
-    } else {
-      interaction.reply({ content: "❌ Erreur interne.", ephemeral: true }).catch(() => {});
-    }
+    await interaction.editReply({ embeds: [emb] });
+  } catch (err) {
+    await logToDiscord(client, "ERROR", "Erreur pendant la résolution/lecture", err);
+    const msg = (err?.message || String(err)).slice(0, 1800);
+    await interaction.editReply(`Oups, erreur : ${msg}`);
   }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+// mini HTTP (keepalive)
+const app = express();
+app.get("/", (_, res) => res.send("ok"));
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => console.log(`[web] listening on ${PORT}`));
 
-// Lance serveur OAuth Spotify
-startSpotifyServer();
+// login
+client.login(process.env.DISCORD_TOKEN);

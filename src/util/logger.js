@@ -1,94 +1,46 @@
 import { EmbedBuilder } from "discord.js";
 
-let _client = null;
+const LEVEL_EMOJI = {
+  INFO: "🟢",
+  WARN: "🟡",
+  ERROR: "❌",
+  LOG: "🟦"
+};
 
-/**
- * À appeler une fois quand le bot est prêt.
- * Exemple: client.once("ready", () => initLogger(client))
- */
-export function initLogger(client) {
-  _client = client;
-}
-
-/**
- * Crée un logger lié au client et (optionnellement) à un salon.
- * Si logChannelId n'est pas fourni, utilise process.env.LOG_CHANNEL_ID.
- *
- * const logger = makeLogger(client)
- * logger.info("Coucou")
- * logger.warn({ title: "Attention", desc: "qqchose s'est passé" })
- * logger.error(new Error("boom"))
- */
-export function makeLogger(client, logChannelId) {
-  const c = client ?? _client;
-  const targetId = (logChannelId || process.env.LOG_CHANNEL_ID || "").trim() || null;
-
-  function getChannel() {
-    try {
-      if (!c || !targetId) return null;
-      return c.channels.cache.get(targetId) ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  async function send(kind, payload) {
-    const chan = getChannel();
-    const color =
-      kind === "error" ? 0xe74c3c :
-      kind === "warn"  ? 0xf1c40f :
-                         0x2ecc71;
-
-    // Normalise payload -> {title?, desc?, fields?}
-    let consoleText = "";
-    let embed = new EmbedBuilder().setColor(color);
-
-    if (typeof payload === "string") {
-      consoleText = payload;
-      embed.setDescription(payload);
-    } else if (payload instanceof Error) {
-      consoleText = payload.stack || payload.message || String(payload);
-      embed.setTitle("Erreur").setDescription("```\n" + consoleText.slice(0, 3900) + "\n```");
-    } else if (payload && typeof payload === "object") {
-      const { title, desc, fields } = payload;
-      consoleText = title ? `${title}: ${desc ?? ""}` : (desc ?? JSON.stringify(payload));
-      if (title) embed.setTitle(title);
-      if (desc)  embed.setDescription(desc);
-      if (Array.isArray(fields) && fields.length) embed.addFields(fields);
-    } else {
-      consoleText = String(payload);
-      embed.setDescription(consoleText);
-    }
+export async function logToDiscord(client, level, message, error) {
+  try {
+    const chId = process.env.LOG_CHANNEL_ID;
+    const emoji = LEVEL_EMOJI[level] ?? "🟦";
 
     // Console
-    try {
-      if (kind === "error") console.error(consoleText);
-      else if (kind === "warn") console.warn(consoleText);
-      else console.log(consoleText);
-    } catch {}
-
-    // Discord (best-effort)
-    if (chan) {
-      try {
-        await chan.send({ embeds: [embed] });
-      } catch {
-        // ne casse jamais l'app
-      }
+    if (error) {
+      console.error(`[${level}] ${message}\n`, error);
+    } else {
+      const fn = level === "WARN" ? console.warn : console.log;
+      fn(`[${level}] ${message}`);
     }
+
+    if (!client || !chId) return;
+
+    const ch = await client.channels.fetch(chId).catch(() => null);
+    if (!ch) return;
+
+    const emb = new EmbedBuilder()
+      .setColor(level === "ERROR" ? 0xed4245 : level === "WARN" ? 0xfee75c : 0x57f287)
+      .setAuthor({ name: "LOG" })
+      .setDescription(`**${emoji} ${level}**\n${message}`)
+      .setTimestamp(Date.now());
+
+    if (error) {
+      const block =
+        "```\n" +
+        (error?.stack || error?.message || String(error)).slice(0, 3800) +
+        "\n```";
+      emb.addFields({ name: "Stack", value: block });
+    }
+
+    await ch.send({ embeds: [emb] });
+  } catch {
+    /* ne casse jamais le bot sur un log */
   }
-
-  return {
-    info: (x) => send("info", x),
-    warn: (x) => send("warn", x),
-    error: (x) => send("error", x),
-  };
-}
-
-/**
- * Helper rétro-compat (info). Évite de casser l'ancien code.
- * Usage: logToDiscord("message")
- */
-export async function logToDiscord(msg) {
-  const logger = makeLogger(_client);
-  await logger.info(msg);
 }
