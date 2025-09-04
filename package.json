@@ -19,6 +19,7 @@
     "ffmpeg-static": "^5.2.0",
     "opusscript": "0.0.8",
     "play-dl": "^1.9.7",
+    "spotify-web-api-node": "^5.0.2",
     "ytdl-core": "^4.11.5"
   },
   "overrides": {
