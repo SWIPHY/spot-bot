@@ -11,8 +11,8 @@ import {
 } from "discord.js";
 import { ensureFfmpeg } from "./util/ffmpeg.js";
 import { logToDiscord } from "./util/logger.js";
-import getOrCreateGuildPlayer from "./core/player.js";
-import resolveTrack from "./util/resolveTrack.js";
+import { getOrCreateGuildPlayer } from "./core/player.js";
+import { resolveTrack } from "./util/resolveTrack.js";
 import play from "play-dl";
 
 // --- FFmpeg
