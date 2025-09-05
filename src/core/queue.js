@@ -1,7 +1,9 @@
-export class Queue {
+// src/core/queue.js
+
+export default class Queue {
   constructor() {
-    this.items = []; // [{ title, url, requestedBy }]
-    this.index = -1; // position du "current" dans items
+    this.items = [];
+    this.index = -1;
   }
 
   get current() {
@@ -23,9 +25,5 @@ export class Queue {
   clear() {
     this.items = [];
     this.index = -1;
-  }
-
-  toJSON() {
-    return { index: this.index, items: this.items };
   }
 }
