@@ -8,159 +8,216 @@ import {
   StreamType,
 } from "@discordjs/voice";
 import play from "play-dl";
-import { logToDiscord } from "../util/logger.js";
 
-export class Queue {
-  constructor() {
-    this.items = [];   // { title, url, requestedBy }
-    this.index = -1;   // pointeur sur l’élément en cours
-  }
-  get current() {
-    return this.items[this.index] || null;
-  }
-  push(t) {
-    this.items.push(t);
-  }
-  moveNext() {
-    if (this.index + 1 < this.items.length) {
-      this.index++;
-      return true;
-    }
-    return false;
-  }
-  clear() {
-    this.items = [];
-    this.index = -1;
+import { Queue } from "./queue.js";                // ta classe Queue (items, index, push, clear, moveNext, current)
+import { logToDiscord } from "../util/logger.js";  // ton logger (ERROR / INFO)
+
+/** cache des players par serveur */
+const players = new Map(); // guildId -> GuildPlayer
+
+/** Fabrique un AudioResource depuis une URL YouTube */
+async function makeResource(url) {
+  // 1) tentative directe
+  try {
+    const stream = await play.stream(url, {
+      quality: 2, // auto
+      discordPlayerCompatibility: true,
+    });
+    return createAudioResource(stream.stream, {
+      inputType:
+        stream.type === "opus" ? StreamType.Opus : StreamType.Arbitrary,
+      inlineVolume: true,
+    });
+  } catch {
+    // 2) fallback via info (évite l'erreur "Invalid URL" sur certains liens courts)
+    const info = await play.video_info(url);
+    const stream = await play.stream_from_info(info, {
+      quality: 2,
+      discordPlayerCompatibility: true,
+    });
+    return createAudioResource(stream.stream, {
+      inputType:
+        stream.type === "opus" ? StreamType.Opus : StreamType.Arbitrary,
+      inlineVolume: true,
+    });
   }
 }
 
-const players = new Map(); // guildId -> GuildPlayer
+/** Player par serveur */
+class GuildPlayer {
+  constructor(guild, textChannel) {
+    this.guild = guild;
+    this.textChannel = textChannel;
+    this.queue = new Queue();
+    this.connection = null;
 
-export function getOrCreateGuildPlayer(guild, textChannel) {
+    this.player = createAudioPlayer({
+      behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
+    });
+
+    // events player
+    this.player.on("error", (err) => {
+      logToDiscord("ERROR", `Audio error: ${err?.message || err}`, err);
+      // en cas d’erreur, on tente le morceau suivant
+      this._playNext().catch((e) =>
+        logToDiscord("ERROR", "Erreur _playNext après audio error", e)
+      );
+    });
+
+    this.player.on("stateChange", (oldS, newS) => {
+      // debug léger si besoin
+      // logToDiscord("INFO", `[voice] ${oldS.status} -> ${newS.status}`);
+      if (
+        oldS.status !== AudioPlayerStatus.Idle &&
+        newS.status === AudioPlayerStatus.Idle
+      ) {
+        // fin d’un morceau -> suivant
+        this._playNext().catch((e) =>
+          logToDiscord("ERROR", "Erreur _playNext après Idle", e)
+        );
+      }
+    });
+  }
+
+  /** Associe / met à jour le channel texte par défaut */
+  setTextChannel(textChannel) {
+    if (textChannel) this.textChannel = textChannel;
+  }
+
+  /** Connexion au salon vocal */
+  connect(voiceChannel) {
+    if (!voiceChannel) throw new Error("Salon vocal introuvable.");
+    const conn =
+      getVoiceConnection(this.guild.id) ||
+      joinVoiceChannel({
+        channelId: voiceChannel.id,
+        guildId: voiceChannel.guild.id,
+        adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+        selfDeaf: true,
+      });
+
+    this.connection = conn;
+    this.connection.subscribe(this.player);
+    return conn;
+  }
+
+  /** Lecture immédiate si possible, sinon mise en file */
+  async playOrEnqueue(track) {
+    if (!track || !track.url) {
+      throw new Error("Track invalide (pas d’URL).");
+    }
+
+    // s'il n'y a rien en cours, on démarre
+    if (this.player.state.status !== AudioPlayerStatus.Playing) {
+      if (this.queue.current() == null) {
+        this.queue.push(track);
+        this.queue.moveNext(); // place l’index sur l’élément ajouté
+      } else {
+        this.queue.push(track);
+      }
+      await this._playCurrent();
+      return;
+    }
+
+    // sinon on empile
+    this.queue.push(track);
+  }
+
+  /** Ajoute plusieurs pistes d’un coup */
+  enqueueMany(tracks) {
+    if (!Array.isArray(tracks) || tracks.length === 0) return;
+    for (const t of tracks) this.queue.push(t);
+
+    if (this.player.state.status !== AudioPlayerStatus.Playing) {
+      // si rien ne joue, lance immédiatement
+      this._playNext().catch((e) =>
+        logToDiscord("ERROR", "Erreur enqueueMany/_playNext", e)
+      );
+    }
+  }
+
+  /** Remplace toute la file */
+  setQueue(tracks) {
+    if (!Array.isArray(tracks)) return;
+
+    if (typeof this.queue.clear === "function") this.queue.clear();
+    else {
+      this.queue.items = [];
+      this.queue.index = -1;
+    }
+
+    for (const t of tracks) this.queue.push(t);
+
+    this._playNext().catch((e) =>
+      logToDiscord("ERROR", "Erreur setQueue/_playNext", e)
+    );
+  }
+
+  /** Joue l’élément courant (selon queue.index) */
+  async _playCurrent() {
+    const t = this.queue.current();
+    if (!t) {
+      logToDiscord("INFO", "✅ File terminée.");
+      return;
+    }
+
+    try {
+      const resource = await makeResource(t.url);
+      this.player.play(resource);
+      logToDiscord("INFO", `🎵 Lecture: ${t.title || "Unknown"}`);
+    } catch (err) {
+      logToDiscord(
+        "ERROR",
+        `play.stream error: ${err?.message || err}. URL: ${t.url}`,
+        err
+      );
+      // on tente le suivant
+      await this._playNext();
+    }
+  }
+
+  /** Passe au morceau suivant, ou stop si fin de file */
+  async _playNext() {
+    // si aucun courant, essaye de se positionner sur le premier
+    if (this.queue.current() == null) {
+      if (this.queue.items.length > 0) {
+        this.queue.index = 0;
+        return this._playCurrent();
+      }
+      logToDiscord("INFO", "✅ File terminée.");
+      return;
+    }
+
+    // sinon avance
+    if (this.queue.moveNext()) {
+      return this._playCurrent();
+    }
+
+    // plus rien
+    logToDiscord("INFO", "✅ File terminée.");
+  }
+
+  /** Stop + reset file */
+  stop() {
+    try {
+      this.player.stop(true);
+    } catch {}
+    if (typeof this.queue.clear === "function") this.queue.clear();
+    else {
+      this.queue.items = [];
+      this.queue.index = -1;
+    }
+  }
+}
+
+/** Export par défaut : récupère ou crée le player d’un serveur */
+export default function getOrCreateGuildPlayer(guild, textChannel) {
   let gp = players.get(guild.id);
   if (!gp) {
     gp = new GuildPlayer(guild, textChannel);
     players.set(guild.id, gp);
   } else if (textChannel) {
-    gp.textChannel = textChannel;
+    gp.setTextChannel(textChannel);
   }
   return gp;
-}
-
-export default getOrCreateGuildPlayer;
-
-export class GuildPlayer {
-  constructor(guild, textChannel) {
-    this.guild = guild;
-    this.textChannel = textChannel;
-
-    this.queue = new Queue();
-    this.connection = null;
-
-    this.player = createAudioPlayer({
-      behaviors: {
-        // On ne coupe pas quand il n’y a plus d’auditeurs
-        noSubscriber: NoSubscriberBehavior.Play,
-      },
-    });
-
-    // Abonnements d’état pour enchaîner / loguer
-    this.player.on("stateChange", (oldS, newS) => {
-      logToDiscord(
-        this.textChannel,
-        `[voice] ${oldS.status} -> ${newS.status}`
-      );
-      if (newS.status === AudioPlayerStatus.Idle) {
-        this._playNext().catch((e) =>
-          this._error(`idle->playNext error`, e)
-        );
-      }
-    });
-
-    this.player.on("error", (err) => {
-      this._error(`AudioPlayer error: ${err?.message || err}`, err);
-      this._playNext().catch(() => {});
-    });
-  }
-
-  async ensureJoin(voiceChannel) {
-    // Si déjà connecté au bon salon, on garde
-    if (this.connection?.joinConfig?.channelId === voiceChannel.id) return;
-
-    // Déconnexion précédente si besoin
-    getVoiceConnection(this.guild.id)?.destroy();
-
-    this.connection = joinVoiceChannel({
-      channelId: voiceChannel.id,
-      guildId: this.guild.id,
-      adapterCreator: this.guild.voiceAdapterCreator,
-      selfDeaf: true,
-      selfMute: false,
-    });
-
-    // Abonnement player -> connection (indispensable)
-    this.connection.subscribe(this.player);
-  }
-
-  /**
-   * Ajoute et démarre si nécessaire
-   */
-  async playOrEnqueue(track, voiceChannel) {
-    await this.ensureJoin(voiceChannel);
-
-    this.queue.push(track);
-    logToDiscord(this.textChannel, `➕ Ajouté à la file: **${track.title}**`);
-
-    // Si rien ne joue encore, on démarre
-    if (this.player.state.status === AudioPlayerStatus.Idle && this.queue.index < 0) {
-      await this._playNext();
-    }
-  }
-
-  async _playNext() {
-    // Avance le pointeur (ou stop si plus rien)
-    const hasNext = this.queue.moveNext();
-    if (!hasNext) {
-      logToDiscord(this.textChannel, "✅ File terminée.");
-      this.queue.clear();
-      this.player.stop(true);
-      return;
-    }
-
-    const current = this.queue.current;
-    if (!current) return;
-
-    logToDiscord(this.textChannel, `🎵 Now playing: **${current.title}**`);
-
-    try {
-      // 1) stream via play-dl (cookies déjà set dans index.js)
-      const stream = await play.stream(current.url, {
-        quality: 2, // auto/best available audio
-        discordPlayerCompatibility: true,
-      });
-
-      // 2) ressource audio
-      const resource = createAudioResource(stream.stream, {
-        inputType: stream.type ?? StreamType.Arbitrary,
-        inlineVolume: true,
-      });
-
-      // 3) lecture
-      this.player.play(resource);
-    } catch (err) {
-      this._error(`play.stream error`, err);
-      // Passe au suivant en cas d’erreur
-      return this._playNext();
-    }
-  }
-
-  stop() {
-    this.queue.clear();
-    this.player.stop(true);
-  }
-
-  _error(prefix, err) {
-    const msg = err?.stack || err?.message || String(err);
-    logToDiscord(this.textChannel, `❌ ERROR\n${prefix}\n\`\`\`\n${msg}\n\`\`\``);
-  }
 }

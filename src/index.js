@@ -1,3 +1,6 @@
+import { ensureFfmpeg } from "./util/ffmpeg.js";        // fixe process.env.FFMPEG_PATH et log le binaire utilisé
+await ensureFfmpeg();
+
 import "dotenv/config";
 import express from "express";
 import {
@@ -5,106 +8,122 @@ import {
   GatewayIntentBits,
   Partials,
   Collection,
-  REST,
   Routes,
-  EmbedBuilder
+  REST,
+  EmbedBuilder,
 } from "discord.js";
-import { ensureFfmpeg } from "./util/ffmpeg.js";
+
+import getOrCreateGuildPlayer from "./core/player.js";
+import resolveTrack from "./util/resolveTrack.js";
 import { logToDiscord } from "./util/logger.js";
-import { getOrCreateGuildPlayer } from "./core/player.js";
-import { resolveTrack } from "./util/resolveTrack.js";
 import play from "play-dl";
 
-// --- FFmpeg
-await ensureFfmpeg();
-
-// --- play-dl (YouTube cookie + identity token)
+// --- play-dl : cookies / identity token depuis .env ---
 const YT_COOKIE = process.env.YT_COOKIE?.trim();
 const YT_ID = process.env.YT_CLIENT_ID?.trim(); // x-youtube-identity-token
 if (YT_COOKIE) {
   play.setToken({
     youtube: {
       cookie: YT_COOKIE,
-      identityToken: YT_ID || undefined
-    }
+      identityToken: YT_ID || undefined,
+    },
   });
   console.log("[yt] play-dl: cookie + identity token configurés");
-} else {
-  console.warn("[yt] ATTENTION: pas de YT_COOKIE dans l'env");
 }
 
-// --- Discord client
+// --- petit serveur HTTP pour "keep-alive" sur Railway ---
+const app = express();
+const PORT = process.env.PORT || 8080;
+app.get("/", (_, res) => res.send("OK"));
+app.listen(PORT, () => console.log(`[web] listening on ${PORT}`));
+
+// --- Discord client ---
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildVoiceStates
+    GatewayIntentBits.GuildVoiceStates,
   ],
-  partials: [Partials.Channel]
+  partials: [Partials.Channel],
 });
 
-// états par serveur: Map<guildId, { queue: Queue }>
-const states = new Collection();
-
-// prêt
-client.once("ready", async () => {
-  console.log(`[bot] connecté en tant que ${client.user.tag}`);
-  await logToDiscord(client, "INFO", `[bot] connecté en tant que ${client.user.tag}`);
+// évènement recommandé (évite l’avertissement v15)
+client.on("clientReady", (c) => {
+  logToDiscord("INFO", `[bot] connecté en tant que ${c.user.tag}`);
 });
 
-// interaction slash: /play <query>
+// compat pour v14: certains environnements n’émettent que "ready"
+client.once("ready", (c) => {
+  logToDiscord("INFO", `[bot] connecté en tant que ${c.user.tag}`);
+});
+
+// --- gestion slash-commands (Play uniquement ici) ---
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== "play") return;
+  const { commandName } = interaction;
 
-  const query = interaction.options.getString("query", true);
-  const member = await interaction.guild.members.fetch(interaction.user.id);
-  const voice = member?.voice?.channel;
+  if (commandName === "play") {
+    const query = interaction.options.getString("query", true);
 
-  if (!voice) {
-    return interaction.reply({ content: "❌ Tu dois être en vocal.", ephemeral: true });
-  }
+    try {
+      // doit être dans un salon vocal
+      const voiceChannel = interaction.member?.voice?.channel;
+      if (!voiceChannel) {
+        return interaction.reply({
+          content: "❌ Tu dois être dans un salon vocal.",
+          ephemeral: true,
+        });
+      }
 
-  // état du guild
-  if (!states.has(interaction.guildId)) {
-    states.set(interaction.guildId, { queue: null });
-  }
-  const state = states.get(interaction.guildId);
+      const gp = getOrCreateGuildPlayer(interaction.guild, interaction.channel);
+      gp.connect(voiceChannel);
 
-  try {
-    await interaction.deferReply({ ephemeral: false });
+      const result = await resolveTrack(query, interaction.user);
 
-    const track = await resolveTrack(query);
-    track.requestedBy = interaction.user.username;
+      if (!result) {
+        await interaction.reply({
+          content: "❌ Rien trouvé pour cette requête.",
+          ephemeral: true,
+        });
+        return;
+      }
 
-    // queue
-    if (!state.queue) {
-      const { Queue } = await import("./core/queue.js");
-      state.queue = new Queue();
+      if (result.kind === "many") {
+        gp.enqueueMany(result.tracks);
+        await interaction.reply({
+          content: `➕ **${result.tracks.length}** titres ajoutés à la file${
+            result.title ? ` (playlist **${result.title}**)` : ""
+          }.`,
+          ephemeral: false,
+        });
+        logToDiscord(
+          "INFO",
+          `+ Playlist ajoutée (${result.tracks.length} titres)${
+            result.title ? `: ${result.title}` : ""
+          }`
+        );
+      } else {
+        await gp.playOrEnqueue(result.track);
+        await interaction.reply({
+          content: `🎵 Ajouté à la file: **${result.track.title || "Unknown"}**`,
+          ephemeral: false,
+        });
+        logToDiscord("INFO", `+ Ajouté à la file: ${result.track.title || "Unknown"}`);
+      }
+    } catch (err) {
+      logToDiscord(
+        "ERROR",
+        "Erreur pendant la résolution/lecture",
+        err
+      );
+      try {
+        await interaction.reply({
+          content: "❌ Oups, erreur pendant la résolution du titre.",
+          ephemeral: true,
+        });
+      } catch {}
     }
-
-    // player
-    const gp = getOrCreateGuildPlayer(interaction.guild, interaction.channel, client);
-    gp.setQueue(state.queue);
-    await gp.connect(voice);
-    await gp.playOrEnqueue(track);
-
-    const emb = new EmbedBuilder()
-      .setColor(0x00b894)
-      .setDescription(`▶️ **Je joue**: ${track.title}`);
-
-    await interaction.editReply({ embeds: [emb] });
-  } catch (err) {
-    await logToDiscord(client, "ERROR", "Erreur pendant la résolution/lecture", err);
-    const msg = (err?.message || String(err)).slice(0, 1800);
-    await interaction.editReply(`Oups, erreur : ${msg}`);
   }
 });
 
-// mini HTTP (keepalive)
-const app = express();
-app.get("/", (_, res) => res.send("ok"));
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`[web] listening on ${PORT}`));
-
-// login
+// --- connexion ---
 client.login(process.env.DISCORD_TOKEN);
