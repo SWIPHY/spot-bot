@@ -9,215 +9,190 @@ import {
 } from "@discordjs/voice";
 import play from "play-dl";
 
-import { Queue } from "./queue.js";                // ta classe Queue (items, index, push, clear, moveNext, current)
-import { logToDiscord } from "../util/logger.js";  // ton logger (ERROR / INFO)
+import Queue from "./queue.js";                  // export default class Queue
+import { logToDiscord } from "../util/logger.js"; // logToDiscord(level, title, fields?)
 
-/** cache des players par serveur */
 const players = new Map(); // guildId -> GuildPlayer
 
-/** Fabrique un AudioResource depuis une URL YouTube */
-async function makeResource(url) {
-  // 1) tentative directe
-  try {
-    const stream = await play.stream(url, {
-      quality: 2, // auto
-      discordPlayerCompatibility: true,
-    });
-    return createAudioResource(stream.stream, {
-      inputType:
-        stream.type === "opus" ? StreamType.Opus : StreamType.Arbitrary,
-      inlineVolume: true,
-    });
-  } catch {
-    // 2) fallback via info (évite l'erreur "Invalid URL" sur certains liens courts)
-    const info = await play.video_info(url);
-    const stream = await play.stream_from_info(info, {
-      quality: 2,
-      discordPlayerCompatibility: true,
-    });
-    return createAudioResource(stream.stream, {
-      inputType:
-        stream.type === "opus" ? StreamType.Opus : StreamType.Arbitrary,
-      inlineVolume: true,
-    });
+export function getOrCreateGuildPlayer(guild, textChannel = null) {
+  let gp = players.get(guild.id);
+  if (!gp) {
+    gp = new GuildPlayer(guild, textChannel);
+    players.set(guild.id, gp);
+  } else if (textChannel) {
+    gp.textChannel = textChannel;
   }
+  return gp;
 }
+export default getOrCreateGuildPlayer;
 
-/** Player par serveur */
 class GuildPlayer {
-  constructor(guild, textChannel) {
+  constructor(guild, textChannel = null) {
     this.guild = guild;
     this.textChannel = textChannel;
-    this.queue = new Queue();
+
+    this.queue = new Queue();      // gère items[], index, current()
+    this.loop = "off";             // "off" | "one" | "all"
+    this.volume = 1.0;
+
+    this.voiceChannelId = null;
     this.connection = null;
 
     this.player = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
     });
 
-    // events player
-    this.player.on("error", (err) => {
-      logToDiscord("ERROR", `Audio error: ${err?.message || err}`, err);
-      // en cas d’erreur, on tente le morceau suivant
-      this._playNext().catch((e) =>
-        logToDiscord("ERROR", "Erreur _playNext après audio error", e)
-      );
-    });
-
     this.player.on("stateChange", (oldS, newS) => {
-      // debug léger si besoin
-      // logToDiscord("INFO", `[voice] ${oldS.status} -> ${newS.status}`);
-      if (
-        oldS.status !== AudioPlayerStatus.Idle &&
-        newS.status === AudioPlayerStatus.Idle
-      ) {
-        // fin d’un morceau -> suivant
-        this._playNext().catch((e) =>
-          logToDiscord("ERROR", "Erreur _playNext après Idle", e)
-        );
+      if (oldS.status !== newS.status && newS.status === AudioPlayerStatus.Idle) {
+        this._afterTrackEnded().catch((e) => this._error("afterTrack", e));
       }
     });
+
+    this.player.on("error", (err) => this._error("AudioPlayer error", err));
   }
 
-  /** Associe / met à jour le channel texte par défaut */
-  setTextChannel(textChannel) {
-    if (textChannel) this.textChannel = textChannel;
+  // ---------------------------------------------------------------------------
+  // Liaison channels
+
+  setTextChannel(channel) {
+    this.textChannel = channel;
   }
 
-  /** Connexion au salon vocal */
+  setVoiceChannel(voiceChannel) {
+    this.voiceChannelId = voiceChannel?.id ?? null;
+  }
+
+  /** Compat avec ton index.js */
   connect(voiceChannel) {
-    if (!voiceChannel) throw new Error("Salon vocal introuvable.");
-    const conn =
-      getVoiceConnection(this.guild.id) ||
+    this.setVoiceChannel(voiceChannel);
+    return this._ensureConnection();
+  }
+
+  async _ensureConnection() {
+    if (!this.voiceChannelId) throw new Error("Pas de salon vocal défini.");
+    this.connection =
+      getVoiceConnection(this.guild.id) ??
       joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: voiceChannel.guild.id,
-        adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-        selfDeaf: true,
+        channelId: this.voiceChannelId,
+        guildId: this.guild.id,
+        adapterCreator: this.guild.voiceAdapterCreator,
       });
-
-    this.connection = conn;
     this.connection.subscribe(this.player);
-    return conn;
   }
 
-  /** Lecture immédiate si possible, sinon mise en file */
-  async playOrEnqueue(track) {
-    if (!track || !track.url) {
-      throw new Error("Track invalide (pas d’URL).");
-    }
+  // ---------------------------------------------------------------------------
+  // File d’attente (API compat)
 
-    // s'il n'y a rien en cours, on démarre
-    if (this.player.state.status !== AudioPlayerStatus.Playing) {
-      if (this.queue.current() == null) {
-        this.queue.push(track);
-        this.queue.moveNext(); // place l’index sur l’élément ajouté
-      } else {
-        this.queue.push(track);
-      }
-      await this._playCurrent();
-      return;
-    }
-
-    // sinon on empile
+  /** Compat : ancien appel `setQueue(track)` */
+  setQueue(track) {
     this.queue.push(track);
+    return this.queue.items.length;
   }
 
-  /** Ajoute plusieurs pistes d’un coup */
-  enqueueMany(tracks) {
-    if (!Array.isArray(tracks) || tracks.length === 0) return;
+  enqueue(track) {
+    return this.setQueue(track);
+  }
+
+  /** Compat : ajoute plusieurs pistes d’un coup (playlists) */
+  enqueueMany(tracks = []) {
     for (const t of tracks) this.queue.push(t);
-
-    if (this.player.state.status !== AudioPlayerStatus.Playing) {
-      // si rien ne joue, lance immédiatement
-      this._playNext().catch((e) =>
-        logToDiscord("ERROR", "Erreur enqueueMany/_playNext", e)
-      );
+    // si on est idle, démarrer
+    if (this.player.state.status === AudioPlayerStatus.Idle) {
+      return this._playNext();
     }
   }
 
-  /** Remplace toute la file */
-  setQueue(tracks) {
-    if (!Array.isArray(tracks)) return;
-
-    if (typeof this.queue.clear === "function") this.queue.clear();
-    else {
-      this.queue.items = [];
-      this.queue.index = -1;
-    }
-
-    for (const t of tracks) this.queue.push(t);
-
-    this._playNext().catch((e) =>
-      logToDiscord("ERROR", "Erreur setQueue/_playNext", e)
-    );
+  clear() {
+    this.queue.clear();
   }
 
-  /** Joue l’élément courant (selon queue.index) */
-  async _playCurrent() {
-    const t = this.queue.current();
-    if (!t) {
-      logToDiscord("INFO", "✅ File terminée.");
-      return;
-    }
-
-    try {
-      const resource = await makeResource(t.url);
-      this.player.play(resource);
-      logToDiscord("INFO", `🎵 Lecture: ${t.title || "Unknown"}`);
-    } catch (err) {
-      logToDiscord(
-        "ERROR",
-        `play.stream error: ${err?.message || err}. URL: ${t.url}`,
-        err
-      );
-      // on tente le suivant
-      await this._playNext();
-    }
-  }
-
-  /** Passe au morceau suivant, ou stop si fin de file */
-  async _playNext() {
-    // si aucun courant, essaye de se positionner sur le premier
-    if (this.queue.current() == null) {
-      if (this.queue.items.length > 0) {
-        this.queue.index = 0;
-        return this._playCurrent();
-      }
-      logToDiscord("INFO", "✅ File terminée.");
-      return;
-    }
-
-    // sinon avance
-    if (this.queue.moveNext()) {
-      return this._playCurrent();
-    }
-
-    // plus rien
-    logToDiscord("INFO", "✅ File terminée.");
-  }
-
-  /** Stop + reset file */
   stop() {
     try {
       this.player.stop(true);
     } catch {}
-    if (typeof this.queue.clear === "function") this.queue.clear();
-    else {
-      this.queue.items = [];
-      this.queue.index = -1;
+    this.clear();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lecture
+
+  async playOrEnqueue(track) {
+    this.queue.push(track);
+    await logToDiscord("INFO", "Ajouté à la file", {
+      title: track.title ?? "Unknown",
+    });
+
+    if (this.player.state.status === AudioPlayerStatus.Idle) {
+      await this._playNext();
     }
   }
-}
 
-/** Export par défaut : récupère ou crée le player d’un serveur */
-export default function getOrCreateGuildPlayer(guild, textChannel) {
-  let gp = players.get(guild.id);
-  if (!gp) {
-    gp = new GuildPlayer(guild, textChannel);
-    players.set(guild.id, gp);
-  } else if (textChannel) {
-    gp.setTextChannel(textChannel);
+  async _afterTrackEnded() {
+    const q = this.queue;
+
+    if (this.loop === "one") {
+      return this._playIndex(q.index);
+    }
+
+    if (this.loop === "all") {
+      if (!q.moveNext() && q.items.length > 0) q.index = 0;
+      if (q.current()) return this._playIndex(q.index);
+    } else {
+      if (q.moveNext()) return this._playIndex(q.index);
+    }
+
+    await logToDiscord("INFO", "File terminée.");
   }
-  return gp;
+
+  async _playNext() {
+    const q = this.queue;
+    if (q.index < 0 && !q.moveNext()) {
+      await logToDiscord("INFO", "File vide.");
+      return;
+    }
+    return this._playIndex(q.index);
+  }
+
+  async _playIndex(i) {
+    const track = this.queue.items[i];
+    if (!track) return;
+
+    await this._ensureConnection();
+
+    try {
+      // play-dl: URL YouTube (ou équivalent résolu) + options safe
+      const s = await play.stream(track.url, {
+        discordPlayerCompatibility: true,
+        quality: 2,
+      });
+
+      const resource = createAudioResource(s.stream, {
+        inputType: s.type ?? StreamType.Arbitrary,
+        inlineVolume: true,
+      });
+      if (resource.volume) resource.volume.setVolume(this.volume);
+
+      this.player.play(resource);
+
+      await logToDiscord("INFO", "Lecture en cours", {
+        title: track.title ?? "Unknown",
+      });
+    } catch (err) {
+      this._error("play.stream", err);
+      // skip ce titre et tenter le suivant
+      if (this.queue.moveNext()) {
+        return this._playIndex(this.queue.index);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Logs
+
+  _error(message, err) {
+    const fields = { message: String(message) };
+    if (err?.stack) fields.stack = "```\n" + err.stack + "\n```";
+    else if (err) fields.error = String(err);
+    logToDiscord("ERROR", "Player", fields);
+  }
 }
